@@ -59,8 +59,13 @@
     log, log10, exp, sin, cos, tan.
 
     The script's own commands (open source folder, settings, reload, exit) sit at
-    the bottom of the list and are searchable like any other entry. They are also on
-    the tray icon's right-click menu.
+    the bottom of the list and are searchable like any other entry.
+
+    The tray icon's right-click menu holds open launcher, open settings, reload and exit.
+    With a "Custom menu folder" set in the settings it also becomes a menu of that folder:
+    subfolders turn into submenus, files matching the global include/exclude filters turn
+    into entries, and "[1]" anywhere in a name sets the order (numbered names first in
+    that order, the rest alphabetically). The menu is rebuilt every time it is opened.
 
     Every launch is recorded in the usage file: how often an entry was started AND
     which search text was typed to reach it. Both feed the ranking, so the entry you
@@ -309,19 +314,67 @@ public class QlNative : NativeWindow, IDisposable {
         if (h != IntPtr.Zero) ShowWindow(h, 0);   // SW_HIDE
     }
 
-    // A ListBox scrollbar is drawn by the theme, not by the control, so the only way to
-    // get a dark one is to put the process into dark mode (undocumented uxtheme exports,
-    // Windows 10 1809 and newer) and give the control the dark Explorer theme.
+    // Menus and dialog scrollbars are drawn by the theme, not by the control, so the only
+    // way to get dark ones is to put the whole process into dark mode (undocumented uxtheme
+    // exports, Windows 10 1809 and newer).
     [DllImport("uxtheme.dll", EntryPoint = "#135", SetLastError = true)]
     private static extern int SetPreferredAppMode(int mode);
     [DllImport("uxtheme.dll", EntryPoint = "#136", SetLastError = true)]
     private static extern void FlushMenuThemes();
-    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
-    private static extern int SetWindowTheme(IntPtr hWnd, string subAppName, string subIdList);
 
-    public static void UseDarkScrollBars(IntPtr hWnd) {
+    public static void UseDarkMode() {
         try { SetPreferredAppMode(2); FlushMenuThemes(); } catch { }   // 2 = force dark
-        try { SetWindowTheme(hWnd, "DarkMode_Explorer", null); } catch { }
+    }
+}
+
+// A ListBox scrollbar is drawn by the theme and cannot be coloured, so the control is
+// created without one and the popup paints its own bar next to it. Everything that can
+// move the view raises ViewChanged, which is what the bar repaints on.
+public class QlListBox : ListBox {
+    private const int WS_VSCROLL = 0x00200000;
+
+    public event EventHandler ViewChanged;
+
+    protected override CreateParams CreateParams {
+        get {
+            CreateParams cp = base.CreateParams;
+            cp.Style &= ~WS_VSCROLL;
+            return cp;
+        }
+    }
+
+    public int VisibleRows {
+        get { return Math.Max(1, ClientSize.Height / Math.Max(1, ItemHeight)); }
+    }
+
+    public int MaxTopIndex {
+        get { return Math.Max(0, Items.Count - VisibleRows); }
+    }
+
+    public void ScrollTo(int top) {
+        int wanted = Math.Min(Math.Max(top, 0), MaxTopIndex);
+        if (wanted != TopIndex) TopIndex = wanted;
+        RaiseViewChanged();
+    }
+
+    // without WS_VSCROLL the native control ignores the wheel, so it is handled here
+    protected override void OnMouseWheel(MouseEventArgs e) {
+        int lines = SystemInformation.MouseWheelScrollLines;
+        if (lines <= 0) lines = 3;
+        ScrollTo(TopIndex - (e.Delta / 120) * lines);
+    }
+
+    protected override void WndProc(ref Message m) {
+        base.WndProc(ref m);
+        // keys and LB_SETTOPINDEX/LB_SETCURSEL scroll the view behind our back
+        if (m.Msg == 0x0100 || m.Msg == 0x0101 || m.Msg == 0x0186 || m.Msg == 0x0197) {
+            RaiseViewChanged();
+        }
+    }
+
+    public void RaiseViewChanged() {
+        EventHandler h = ViewChanged;
+        if (h != null) h(this, EventArgs.Empty);
     }
 }
 
@@ -347,9 +400,13 @@ public class QlProbe : NativeWindow, IDisposable {
         }
     }
 }
-'@ -ReferencedAssemblies System.Windows.Forms, System.Windows.Forms.Primitives, System.Drawing
+'@ -ReferencedAssemblies System.Windows.Forms, System.Windows.Forms.Primitives, System.Drawing,
+                          System.ComponentModel.Primitives, System.ObjectModel, System.Drawing.Primitives
 
 if (-not $ShowConsole) { [QlNative]::HideConsole() }
+
+# dark tray menu and dark scrollbars in the settings window
+[QlNative]::UseDarkMode()
 
 # --- config -------------------------------------------------------------------
 
@@ -359,6 +416,8 @@ $defaultConfig = [ordered]@{
     sources      = @(
         [ordered]@{ path = 'D:\start'; include = ''; exclude = ''; shortcut = '' }
     )
+    # folder the tray menu is built from; empty means the built-in menu only
+    menuDir      = ''
     hotkey       = 'Ctrl+Alt+R'
     # answer combinations Windows keeps for itself (Win+R, ...) with a keyboard hook
     hookReserved = $false
@@ -383,6 +442,8 @@ $defaultConfig = [ordered]@{
         selection  = '#005A9E'
         selText    = '#D2E1F0'
         searchBack = '#2D2D2D'
+        scrollBack = '#202020'
+        scrollBar  = '#5A5A5A'
     }
     # folders reachable with "dir <text>" / "cd <text>"; a trailing \* or /* means
     # "every immediate subfolder of this one"
@@ -396,6 +457,8 @@ $script:colorKeys = @(
     @{ Key = 'selection';  Text = 'Selected row' }
     @{ Key = 'selText';    Text = 'Group on selected row' }
     @{ Key = 'searchBack'; Text = 'Search box' }
+    @{ Key = 'scrollBack'; Text = 'Scrollbar track' }
+    @{ Key = 'scrollBar';  Text = 'Scrollbar thumb' }
 )
 
 function ConvertTo-Color([string] $text, $fallback) {
@@ -1309,8 +1372,8 @@ function Show-Settings {
     $f.StartPosition   = 'CenterScreen'
     $f.FormBorderStyle = 'Sizable'
     $f.MinimizeBox     = $false
-    $f.ClientSize      = New-Object Drawing.Size(830, 738)
-    $f.MinimumSize     = New-Object Drawing.Size(700, 668)
+    $f.ClientSize      = New-Object Drawing.Size(830, 820)
+    $f.MinimumSize     = New-Object Drawing.Size(700, 750)
     $f.Font            = New-Object Drawing.Font('Segoe UI', 9)
     $script:settingsForm = $f
 
@@ -1578,8 +1641,28 @@ function Show-Settings {
         }
     })
 
+    # --- custom menu folder
+    $y = 612
+    $f.Controls.Add((New-SettingsLabel 'Custom menu folder' 12 ($y + 3)))
+    $txtMenu = New-Object Windows.Forms.TextBox
+    $txtMenu.Text     = [string]$script:cfg.menuDir
+    $txtMenu.Location = New-Object Drawing.Point(140, $y)
+    $txtMenu.Width    = 560
+    $f.Controls.Add($txtMenu)
+    $btnMenu = New-Object Windows.Forms.Button
+    $btnMenu.Text = 'Browse...'; $btnMenu.Width = 108
+    $btnMenu.Location = New-Object Drawing.Point(710, ($y - 1))
+    $btnMenu.Add_Click({
+        $d = New-Object Windows.Forms.FolderBrowserDialog
+        if ($txtMenu.Text) { $d.SelectedPath = $txtMenu.Text }
+        if ($d.ShowDialog() -eq 'OK') { $txtMenu.Text = $d.SelectedPath }
+    })
+    $f.Controls.Add($btnMenu)
+    $f.Controls.Add((New-SettingsLabel ('fills the tray menu: subfolders become submenus, files matching the ' +
+        'global filters become entries, "[1]" in a name sets the order') 12 ($y + 28)))
+
     # --- folders
-    $y = 580
+    $y = 662
     $f.Controls.Add((New-SettingsLabel 'Folders, one per line ("D:\work\*" means every subfolder)' 12 $y))
     $txtDirs = New-Object Windows.Forms.TextBox
     $txtDirs.Multiline  = $true
@@ -1593,12 +1676,12 @@ function Show-Settings {
     # --- ok / cancel
     $btnOk = New-Object Windows.Forms.Button
     $btnOk.Text = 'Save'; $btnOk.Width = 100
-    $btnOk.Location = New-Object Drawing.Point(618, 700)
+    $btnOk.Location = New-Object Drawing.Point(618, 782)
     $f.Controls.Add($btnOk)
 
     $btnCancel = New-Object Windows.Forms.Button
     $btnCancel.Text = 'Cancel'; $btnCancel.Width = 100
-    $btnCancel.Location = New-Object Drawing.Point(718, 700)
+    $btnCancel.Location = New-Object Drawing.Point(718, 782)
     $btnCancel.DialogResult = 'Cancel'
     $f.Controls.Add($btnCancel)
     $f.CancelButton = $btnCancel
@@ -1607,9 +1690,9 @@ function Show-Settings {
     # place above the bottom edge
     foreach ($c in $f.Controls) {
         if ($c -eq $grid -or $c.Top -lt $btnY) { continue }
-        $c.Anchor = if ($c -eq $txtDirs)                    { 'Bottom,Left,Right' }
-                    elseif ($c -eq $btnOk -or $c -eq $btnCancel) { 'Bottom,Right' }
-                    else                                   { 'Bottom,Left' }
+        $c.Anchor = if ($c -eq $txtDirs -or $c -eq $txtMenu)              { 'Bottom,Left,Right' }
+                    elseif ($c -eq $btnOk -or $c -eq $btnCancel -or $c -eq $btnMenu) { 'Bottom,Right' }
+                    else                                                 { 'Bottom,Left' }
     }
 
     $btnOk.Add_Click({
@@ -1643,6 +1726,7 @@ function Show-Settings {
         $new = @{}
         foreach ($k in $script:cfg.Keys) { $new[$k] = $script:cfg[$k] }
         $new['sources']      = $sources
+        $new['menuDir']      = $txtMenu.Text.Trim()
         $new['hotkey']       = $hot
         $new['hookReserved'] = [bool]$chkHook.Checked
         $new['runAtLogon']   = [bool]$chkStart.Checked
@@ -1702,6 +1786,8 @@ function Update-ColorValues {
     $script:colSel    = Get-CfgColor 'selection'
     $script:colSelDim = Get-CfgColor 'selText'
     $script:colSearch = Get-CfgColor 'searchBack'
+    $script:colScroll = Get-CfgColor 'scrollBack'
+    $script:colThumb  = Get-CfgColor 'scrollBar'
 }
 Update-ColorValues
 
@@ -1736,7 +1822,10 @@ $search.Multiline   = $true      # a single-line TextBox ignores Height
 $search.Height      = $searchH
 $form.Controls.Add($search)
 
-$list = New-Object Windows.Forms.ListBox
+$listArea = New-Object Windows.Forms.Panel
+$listArea.Dock = 'Fill'
+
+$list = New-Object QlListBox
 $list.DrawMode      = 'OwnerDrawFixed'
 $list.ItemHeight    = $rowH
 $list.BorderStyle   = 'None'
@@ -1744,7 +1833,60 @@ $list.BackColor     = $colBack
 $list.ForeColor     = $colFore
 $list.Dock          = 'Fill'
 $list.IntegralHeight = $false
-$form.Controls.Add($list)
+
+# the list is created without a scrollbar of its own, so the bar is painted here in the
+# configured colours
+$script:scrollW    = 10
+$script:scrollDrag = -1        # grab offset inside the thumb while dragging, -1 = not dragging
+$scrollBar = New-Object Windows.Forms.Panel
+$scrollBar.Dock  = 'Right'
+$scrollBar.Width = $script:scrollW
+
+function Get-ScrollThumb {
+    $max = $list.MaxTopIndex
+    if ($max -le 0) { return $null }
+    $h = $scrollBar.Height
+    $th = [int][math]::Max(24, $h * $list.VisibleRows / $list.Items.Count)
+    $y  = [int](($h - $th) * $list.TopIndex / $max)
+    @{ Top = $y; Height = $th; Track = ($h - $th); Max = $max }
+}
+
+$scrollBar.Add_Paint({
+    param($s, $e)
+    $t = Get-ScrollThumb
+    # nothing to scroll - the strip stays invisible instead of showing an empty track
+    if (-not $t) { $e.Graphics.Clear($script:colBack); return }
+    $e.Graphics.Clear($script:colScroll)
+    $e.Graphics.FillRectangle((New-Object Drawing.SolidBrush $script:colThumb),
+        2, $t.Top, ($s.Width - 4), $t.Height)
+})
+
+$scrollBar.Add_MouseDown({
+    param($s, $e)
+    $t = Get-ScrollThumb
+    if (-not $t) { return }
+    if ($e.Y -ge $t.Top -and $e.Y -lt ($t.Top + $t.Height)) {
+        $script:scrollDrag = $e.Y - $t.Top
+        return
+    }
+    # a click next to the thumb pages towards it
+    $page = if ($e.Y -lt $t.Top) { -$list.VisibleRows } else { $list.VisibleRows }
+    $list.ScrollTo($list.TopIndex + $page)
+})
+$scrollBar.Add_MouseMove({
+    param($s, $e)
+    if ($script:scrollDrag -lt 0) { return }
+    $t = Get-ScrollThumb
+    if (-not $t -or $t.Track -le 0) { return }
+    $list.ScrollTo([int][math]::Round(($e.Y - $script:scrollDrag) * $t.Max / $t.Track))
+})
+$scrollBar.Add_MouseUp({ $script:scrollDrag = -1 })
+$list.Add_ViewChanged({ $scrollBar.Invalidate() })
+
+$listArea.Controls.Add($scrollBar)
+$listArea.Controls.Add($list)
+$list.BringToFront()
+$form.Controls.Add($listArea)
 
 $hint = New-Object Windows.Forms.Label
 $hint.Dock      = 'Bottom'
@@ -1756,7 +1898,6 @@ $script:hintDefault = '  Enter run   Shift+Enter parameters   ".." folders   "!"
 $script:hintCalc    = '  Enter copies the result   + - * / % ^ ( ) pi e sqrt round min max log ...   Esc close'
 $script:hintWeb     = '  Enter opens it in the browser   Esc close'
 $script:dirPool  = $null
-$script:darkScrollDone = $false
 $script:argMode  = $false
 $script:argItem  = $null
 $script:argQuery = ''
@@ -1803,7 +1944,7 @@ $hintBar.Controls.Add($hint)
 $hint.BringToFront()
 $form.Controls.Add($hintBar)
 # docking is applied back-to-front, so the Fill control must be front-most
-$list.BringToFront()
+$listArea.BringToFront()
 
 function Update-Layout {
     Update-Metrics
@@ -1813,6 +1954,8 @@ function Update-Layout {
     $search.ForeColor  = $script:colFore
     $list.BackColor    = $script:colBack
     $list.ForeColor    = $script:colFore
+    $listArea.BackColor = $script:colBack
+    $scrollBar.Invalidate()
     $hintBar.BackColor = $script:colBack
     $gear.BackColor    = $script:colBack
     $hint.ForeColor    = $script:colDim
@@ -1880,6 +2023,7 @@ function Update-List {
     if ($list.Items.Count -gt 0) { $list.SelectedIndex = 0 }
     $rows = [math]::Max(1, [math]::Min([int]$script:cfg.rows, $list.Items.Count))
     $form.Height = $search.Height + ($rows * $rowH) + $hintBar.Height + ($script:padPx * 2)
+    $scrollBar.Invalidate()
 }
 
 function Move-Selection([int] $delta) {
@@ -2015,11 +2159,6 @@ function Show-Launcher {
     $form.Left = $scr.Left + [int](($scr.Width  - $form.Width) / 2)
     $form.Top  = $scr.Top  + [int](($scr.Height - $form.Height) / 3)
     $form.Show()
-    if (-not $script:darkScrollDone) {
-        # needs a created handle, so it can only happen once the popup exists
-        [QlNative]::UseDarkScrollBars($list.Handle)
-        $script:darkScrollDone = $true
-    }
     $form.Activate()
     [void][QlNative]::SetForegroundWindow($form.Handle)
     $search.Focus()
@@ -2090,17 +2229,81 @@ $tray.Icon    = New-SquareIcon
 $tray.Text    = "QuickLaunch  ($($script:cfg.hotkey))"
 $tray.Visible = $true
 
+# "[3]" anywhere in the name is the sort order: entries carrying one come first in that
+# order, everything else follows alphabetically
+function Split-MenuOrder([string] $name) {
+    $m = [regex]::Match($name, '\[\s*(\d+)\s*\]')
+    if (-not $m.Success) { return @{ Name = $name.Trim(); Order = [int]::MaxValue } }
+    @{ Name = $name.Remove($m.Index, $m.Length).Trim(); Order = [int]$m.Groups[1].Value }
+}
+
+# one folder level of the menu folder: subfolders become submenus, files become entries
+function Get-MenuEntries([string] $path) {
+    $inc = @(Split-Patterns ([string]$script:cfg.includeNames))
+    $exc = @(Split-Patterns ([string]$script:cfg.excludeNames))
+    $out = @()
+    foreach ($e in Get-ChildItem -LiteralPath $path -EA SilentlyContinue) {
+        if ($e.Attributes -band [IO.FileAttributes]::Hidden) { continue }
+        if (Test-Pattern $e.Name $exc) { continue }
+        $isDir = [bool]$e.PSIsContainer
+        # the include filter names files; folders are the structure of the menu
+        if (-not $isDir -and $inc.Count -and -not (Test-Pattern $e.Name $inc)) { continue }
+        $raw  = if ($isDir) { $e.Name } else { $e.BaseName }
+        $ord  = Split-MenuOrder $raw
+        $name = (Split-EntryName $ord.Name).Name
+        if (-not $name) { $name = $raw }
+        $out += [pscustomobject]@{ Name = $name; Path = $e.FullName; IsDir = $isDir; Order = $ord.Order }
+    }
+    @($out | Sort-Object -Property Order, Name)
+}
+
+function Start-MenuEntry([string] $path) {
+    Invoke-Entry ([pscustomobject]@{ Key = $path; Path = $path; Command = $null }) '' ''
+}
+
+function Add-MenuEntries($items, [string] $path, [int] $depth) {
+    foreach ($e in Get-MenuEntries $path) {
+        if ($e.IsDir) {
+            $sub = New-Object Windows.Forms.ToolStripMenuItem $e.Name
+            if ($depth -lt 8) { Add-MenuEntries $sub.DropDownItems $e.Path ($depth + 1) }
+            $sub.Enabled = $sub.DropDownItems.Count -gt 0
+            [void]$items.Add($sub)
+        } else {
+            $entry = New-Object Windows.Forms.ToolStripMenuItem $e.Name
+            $entry.Tag = $e.Path
+            $entry.Add_Click({ param($s, $ev) Start-MenuEntry ([string]$s.Tag) })
+            [void]$items.Add($entry)
+        }
+    }
+}
+
 $menu = New-Object Windows.Forms.ContextMenuStrip
-[void]$menu.Items.Add('Open launcher',            $null, { Show-Launcher })
-[void]$menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
-[void]$menu.Items.Add('Open first source folder', $null, {
-    $first = @(Get-EffectiveSources)[0]
-    if ($first) { Start-Process explorer.exe $first.Path }
-})
-[void]$menu.Items.Add('Settings',                 $null, { Show-Settings })
-[void]$menu.Items.Add('Reload settings and list', $null, { Reset-Config })
-[void]$menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
-[void]$menu.Items.Add('Exit QuickLaunch',         $null, { Stop-QuickLaunch })
+
+# the menu folder can change any time, so the menu is rebuilt right before it is shown
+function Update-TrayMenu {
+    foreach ($i in @($menu.Items)) { $i.Dispose() }
+    $menu.Items.Clear()
+    $dir = ([string]$script:cfg.menuDir).Trim()
+    if ($dir) {
+        if (Test-Path -LiteralPath $dir -PathType Container) {
+            try { Add-MenuEntries $menu.Items $dir 0 }
+            catch { Log "menu folder '$dir' failed: $($_.Exception.Message)" }
+            if ($menu.Items.Count -gt 0) {
+                [void]$menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
+            }
+        } else {
+            Log "menu folder not found: $dir"
+        }
+    }
+    [void]$menu.Items.Add('Open launcher',             $null, { Show-Launcher })
+    [void]$menu.Items.Add('Open settings',             $null, { Show-Settings })
+    [void]$menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
+    [void]$menu.Items.Add('Reload settings and lists', $null, { Reset-Config })
+    [void]$menu.Items.Add('Exit launcher',             $null, { Stop-QuickLaunch })
+}
+
+$menu.Add_Opening({ Update-TrayMenu })
+Update-TrayMenu
 $tray.ContextMenuStrip = $menu
 
 $tray.Add_MouseClick({
@@ -2113,6 +2316,7 @@ function Reset-Config {
     $script:iconMem = @{}
     $script:dirPool = $null
     Update-Layout
+    Update-TrayMenu
     $tray.Text  = "QuickLaunch  ($($script:cfg.hotkey))"
     if (-not (Register-QlHotKey)) {
         $tray.ShowBalloonTip(4000, 'QuickLaunch', "Hotkey '$($script:cfg.hotkey)' could not be registered.", 'Warning')

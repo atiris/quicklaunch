@@ -52,7 +52,7 @@ Other parameters: `-ShowConsole` keeps the console visible for debugging.
 
 Subdirectories of a source become groups. The script's own commands (open source folder,
 settings, reload, exit) sit at the bottom of the list and are searchable like any other
-entry; they are also on the tray icon's right-click menu.
+entry.
 
 ### Prefixes
 
@@ -86,12 +86,44 @@ Every launch is recorded: how often an entry was started **and** which search te
 typed to reach it. Both feed the ranking, so the entry you usually start by typing `cc`
 ends up first the next time you type `cc`.
 
+## Tray menu
+
+Right-clicking the tray icon opens *Open launcher*, *Open settings*, *Reload settings and
+lists* and *Exit launcher*.
+
+Set a **Custom menu folder** in the settings and that folder is put on top of the menu:
+
+- subfolders become submenus, as deep as the folder tree goes
+- files matching the global include and exclude filters become entries; clicking one
+  starts it just like the popup does (and it counts towards the ranking)
+- `[1]` anywhere in a folder or file name sets the order: numbered names come first in
+  that order, everything else follows alphabetically
+- alternative names in brackets are stripped from what is shown, same as in the popup
+
+With `D:\start` as the menu folder:
+
+```
+D:\start\                          HeyPay        >
+  HeyPay\                          Personalspace >
+  Personalspace\                   System        >
+  System\                 ->       Windows       >
+  Windows\                         Workspace     >  ->  Terminal inkaska
+  Workspace\                       -----------------
+    Terminal inkaska.lnk           Open launcher
+                                   ...
+```
+
+The menu is rebuilt every time it is opened, so changes in the folder show up at once.
+
 ## Settings
 
-Everything is edited in the built-in settings window - tray menu *Settings*, the gear at
-the bottom right of the popup, or the *Settings* entry in the list. It covers sources,
-hotkey, sizes, colours and the `dir` folder list; a button adds the Start Menu folders as
-sources.
+Everything is edited in the built-in settings window - tray menu *Open settings*, the gear
+at the bottom right of the popup, or the *Settings* entry in the list. It covers sources,
+hotkey, sizes, colours, the custom menu folder and the `dir` folder list; a button adds the
+Start Menu folders as sources.
+
+The popup draws its own scrollbar, so its track (`scrollBack`) and thumb (`scrollBar`) are
+ordinary colours in the settings like every other one.
 
 ### Sources
 
@@ -130,6 +162,7 @@ the changes up.
   "sources": [
     { "path": "D:\\start", "include": "", "exclude": "", "shortcut": "" }
   ],
+  "menuDir": "",
   "hotkey": "Ctrl+Alt+R",
   "hookReserved": false,
   "runAtLogon": false,
@@ -150,7 +183,9 @@ the changes up.
     "dim": "#969696",
     "selection": "#005A9E",
     "selText": "#D2E1F0",
-    "searchBack": "#2D2D2D"
+    "searchBack": "#2D2D2D",
+    "scrollBack": "#202020",
+    "scrollBar": "#5A5A5A"
   },
   "dirs": ["D:\\", "D:\\workspace", "D:\\workspace\\*"]
 }
