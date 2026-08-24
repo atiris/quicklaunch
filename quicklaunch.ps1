@@ -13,7 +13,9 @@
     ("*protect*.*") and an optional shortcut letter. Typing that letter and a space
     at the start of the query ("s ") limits the list to that source. The Start Menu
     folders are ordinary sources too - the settings window has a button that adds
-    them.
+    them. "Ignore duplicates from later sources" keeps only the first entry of a name
+    and puts a "*" behind its group, so a program listed in several Start Menu folders
+    shows up once.
 
     Everything is edited in the built-in settings window (tray menu "Settings", the gear
     at the bottom right of the popup, or the "Settings" entry in the list) - including
@@ -427,6 +429,9 @@ $defaultConfig = [ordered]@{
     fontSize     = 12
     showGroup    = $true
     showIcons    = $true
+    # a name found in an earlier source wins; the later duplicate is dropped and the
+    # surviving entry gets a "*" behind its group
+    dropDuplicates = $true
     # global filters, used for every source that has no filter of its own
     includeNames = '*.lnk;*.exe;*.url'
     excludeNames = 'desktop.ini;thumbs.db'
@@ -1060,6 +1065,24 @@ function Get-Items {
         }
     }
 
+    # the same program often sits in more than one source - keep the first one found
+    # and mark its group with "*" so the hidden duplicates stay visible
+    if ($script:cfg.dropDuplicates) {
+        $seen = @{}
+        $kept = @()
+        foreach ($it in $items) {
+            $first = $seen[$it.NameNorm]
+            if ($first) {
+                if (-not $first.Group.EndsWith('*')) { $first.Group = $first.Group + '*' }
+                continue
+            }
+            $seen[$it.NameNorm] = $it
+            $kept += $it
+        }
+        if ($kept.Count -ne $items.Count) { Log "duplicates dropped: $($items.Count - $kept.Count)" }
+        $items = $kept
+    }
+
     foreach ($src in $sources) {
         $r = $src.Path
         $items += New-CommandItem "openroot:$r" "Open folder $r" 'QuickLaunch' { Start-Process explorer.exe $r }.GetNewClosure()
@@ -1547,6 +1570,7 @@ function Show-Settings {
 
     # --- toggles
     $y = 350
+    $f.Controls.Add((New-SettingsLabel 'Options' 12 ($y + 1)))
     $chkIcons = New-Object Windows.Forms.CheckBox
     $chkIcons.Text = 'Show icons'; $chkIcons.AutoSize = $true
     $chkIcons.Location = New-Object Drawing.Point(140, $y)
@@ -1558,6 +1582,12 @@ function Show-Settings {
     $chkGroup.Location = New-Object Drawing.Point(280, $y)
     $chkGroup.Checked = [bool]$script:cfg.showGroup
     $f.Controls.Add($chkGroup)
+
+    $chkDup = New-Object Windows.Forms.CheckBox
+    $chkDup.Text = 'Ignore duplicates from later sources'; $chkDup.AutoSize = $true
+    $chkDup.Location = New-Object Drawing.Point(470, $y)
+    $chkDup.Checked = [bool]$script:cfg.dropDuplicates
+    $f.Controls.Add($chkDup)
 
     # --- global filters
     $y = 382
@@ -1735,6 +1765,7 @@ function Show-Settings {
         $new['fontSize']     = [int]$numFont.Value
         $new['showIcons']    = [bool]$chkIcons.Checked
         $new['showGroup']    = [bool]$chkGroup.Checked
+        $new['dropDuplicates'] = [bool]$chkDup.Checked
         $new['includeNames'] = $txtInc.Text.Trim()
         $new['excludeNames'] = $txtExc.Text.Trim()
         $new['offerDirs']    = [bool]$chkDirs.Checked

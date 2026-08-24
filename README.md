@@ -131,6 +131,12 @@ A source is a folder plus an include filter (`*.lnk;*.exe`), an exclude filter
 (`*protect*.*`) and an optional shortcut letter. A source without its own filters uses the
 global ones. With more than one source the source name is shown in front of the group.
 
+With *Ignore duplicates from later sources* on (the default), an entry whose name was
+already found in an earlier source is dropped, so the same program listed in several Start
+Menu folders appears once. The surviving entry gets a `*` behind its group
+(`start\Windows*`) to show that duplicates were hidden. Turning the option off lists every
+copy.
+
 ### Hotkey
 
 The hotkey is put together from the Ctrl/Alt/Shift/Win checkboxes and a key list. The
@@ -171,6 +177,7 @@ the changes up.
   "fontSize": 12,
   "showGroup": true,
   "showIcons": true,
+  "dropDuplicates": true,
   "includeNames": "*.lnk;*.exe;*.url",
   "excludeNames": "desktop.ini;thumbs.db",
   "offerDirs": true,
