@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Tray launcher for a folder of shortcuts, with a global hotkey, live search
     filter and usage-based ranking.
@@ -432,6 +432,8 @@ $defaultConfig = [ordered]@{
     # a name found in an earlier source wins; the later duplicate is dropped and the
     # surviving entry gets a "*" behind its group
     dropDuplicates = $true
+    # a left click in the list starts the entry right away; off means double click only
+    singleClick  = $true
     # global filters, used for every source that has no filter of its own
     includeNames = '*.lnk;*.exe;*.url'
     excludeNames = 'desktop.ini;thumbs.db'
@@ -1395,8 +1397,8 @@ function Show-Settings {
     $f.StartPosition   = 'CenterScreen'
     $f.FormBorderStyle = 'Sizable'
     $f.MinimizeBox     = $false
-    $f.ClientSize      = New-Object Drawing.Size(830, 820)
-    $f.MinimumSize     = New-Object Drawing.Size(700, 750)
+    $f.ClientSize      = New-Object Drawing.Size(830, 850)
+    $f.MinimumSize     = New-Object Drawing.Size(700, 780)
     $f.Font            = New-Object Drawing.Font('Segoe UI', 9)
     $script:settingsForm = $f
 
@@ -1589,8 +1591,14 @@ function Show-Settings {
     $chkDup.Checked = [bool]$script:cfg.dropDuplicates
     $f.Controls.Add($chkDup)
 
+    $chkSingle = New-Object Windows.Forms.CheckBox
+    $chkSingle.Text = 'Open items with a single click'; $chkSingle.AutoSize = $true
+    $chkSingle.Location = New-Object Drawing.Point(140, ($y + 26))
+    $chkSingle.Checked = [bool]$script:cfg.singleClick
+    $f.Controls.Add($chkSingle)
+
     # --- global filters
-    $y = 382
+    $y = 412
     $f.Controls.Add((New-SettingsLabel 'Global include' 12 ($y + 3)))
     $txtInc = New-Object Windows.Forms.TextBox
     $txtInc.Text = [string]$script:cfg.includeNames
@@ -1598,7 +1606,7 @@ function Show-Settings {
     $f.Controls.Add($txtInc)
     $f.Controls.Add((New-SettingsLabel 'used by sources with an empty include' 470 ($y + 3)))
 
-    $y = 412
+    $y = 442
     $f.Controls.Add((New-SettingsLabel 'Global exclude' 12 ($y + 3)))
     $txtExc = New-Object Windows.Forms.TextBox
     $txtExc.Text = [string]$script:cfg.excludeNames
@@ -1607,7 +1615,7 @@ function Show-Settings {
     $f.Controls.Add((New-SettingsLabel 'always applied, on top of the source exclude' 470 ($y + 3)))
 
     # --- folders
-    $y = 444
+    $y = 474
     $chkDirs = New-Object Windows.Forms.CheckBox
     $chkDirs.Text = 'Offer folders with "dir" / "cd"'; $chkDirs.AutoSize = $true
     $chkDirs.Location = New-Object Drawing.Point(140, $y)
@@ -1620,7 +1628,7 @@ function Show-Settings {
     $chkRun.Checked = [bool]$script:cfg.offerRun
     $f.Controls.Add($chkRun)
 
-    $y = 472
+    $y = 502
     $chkWeb = New-Object Windows.Forms.CheckBox
     $chkWeb.Text = 'Open URLs with "web <url>" / "//<url>"'; $chkWeb.AutoSize = $true
     $chkWeb.Location = New-Object Drawing.Point(140, $y)
@@ -1634,7 +1642,7 @@ function Show-Settings {
     $f.Controls.Add($chkCalc)
 
     # --- colours
-    $y = 500
+    $y = 530
     $f.Controls.Add((New-SettingsLabel 'Colours of the popup - click a box to change it' 12 ($y + 3)))
     $btnColReset = New-Object Windows.Forms.Button
     $btnColReset.Text = 'Default colours'; $btnColReset.Width = 120
@@ -1645,7 +1653,7 @@ function Show-Settings {
     $i = 0
     foreach ($cd in $script:colorKeys) {
         $cx = 12 + ($i % 3) * 272
-        $cy = 528 + [int][math]::Floor($i / 3) * 26
+        $cy = 558 + [int][math]::Floor($i / 3) * 26
         $box = New-Object Windows.Forms.Panel
         $box.Size        = New-Object Drawing.Size(28, 18)
         $box.Location    = New-Object Drawing.Point($cx, $cy)
@@ -1672,7 +1680,7 @@ function Show-Settings {
     })
 
     # --- custom menu folder
-    $y = 612
+    $y = 642
     $f.Controls.Add((New-SettingsLabel 'Custom menu folder' 12 ($y + 3)))
     $txtMenu = New-Object Windows.Forms.TextBox
     $txtMenu.Text     = [string]$script:cfg.menuDir
@@ -1692,7 +1700,7 @@ function Show-Settings {
         'global filters become entries, "[1]" in a name sets the order') 12 ($y + 28)))
 
     # --- folders
-    $y = 662
+    $y = 692
     $f.Controls.Add((New-SettingsLabel 'Folders, one per line ("D:\work\*" means every subfolder)' 12 $y))
     $txtDirs = New-Object Windows.Forms.TextBox
     $txtDirs.Multiline  = $true
@@ -1706,12 +1714,12 @@ function Show-Settings {
     # --- ok / cancel
     $btnOk = New-Object Windows.Forms.Button
     $btnOk.Text = 'Save'; $btnOk.Width = 100
-    $btnOk.Location = New-Object Drawing.Point(618, 782)
+    $btnOk.Location = New-Object Drawing.Point(618, 812)
     $f.Controls.Add($btnOk)
 
     $btnCancel = New-Object Windows.Forms.Button
     $btnCancel.Text = 'Cancel'; $btnCancel.Width = 100
-    $btnCancel.Location = New-Object Drawing.Point(718, 782)
+    $btnCancel.Location = New-Object Drawing.Point(718, 812)
     $btnCancel.DialogResult = 'Cancel'
     $f.Controls.Add($btnCancel)
     $f.CancelButton = $btnCancel
@@ -1766,6 +1774,7 @@ function Show-Settings {
         $new['showIcons']    = [bool]$chkIcons.Checked
         $new['showGroup']    = [bool]$chkGroup.Checked
         $new['dropDuplicates'] = [bool]$chkDup.Checked
+        $new['singleClick']  = [bool]$chkSingle.Checked
         $new['includeNames'] = $txtInc.Text.Trim()
         $new['excludeNames'] = $txtExc.Text.Trim()
         $new['offerDirs']    = [bool]$chkDirs.Checked
@@ -2134,6 +2143,12 @@ $search.Add_KeyDown({
 })
 $search.Add_TextChanged({ Update-List })
 $list.Add_MouseDoubleClick({ Invoke-Selected })
+$list.Add_MouseClick({
+    param($s, $e)
+    if (-not $script:cfg.singleClick -or $e.Button -ne [Windows.Forms.MouseButtons]::Left) { return }
+    $i = $list.IndexFromPoint($e.Location)
+    if ($i -ge 0) { $list.SelectedIndex = $i; Invoke-Selected }
+})
 $list.Add_KeyDown({
     param($s, $e)
     if ($e.KeyCode -eq 'Enter')  { $e.Handled = $true; Invoke-Selected }

@@ -137,6 +137,11 @@ Menu folders appears once. The surviving entry gets a `*` behind its group
 (`start\Windows*`) to show that duplicates were hidden. Turning the option off lists every
 copy.
 
+### Opening entries
+
+With *Open items with a single click* on (the default), a left click in the list starts the
+entry right away. Turning it off keeps the mouse on double click; Enter works either way.
+
 ### Hotkey
 
 The hotkey is put together from the Ctrl/Alt/Shift/Win checkboxes and a key list. The
@@ -178,6 +183,7 @@ the changes up.
   "showGroup": true,
   "showIcons": true,
   "dropDuplicates": true,
+  "singleClick": true,
   "includeNames": "*.lnk;*.exe;*.url",
   "excludeNames": "desktop.ini;thumbs.db",
   "offerDirs": true,
