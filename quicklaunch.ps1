@@ -5,7 +5,8 @@
 
 .DESCRIPTION
     Puts a black square in the notification area. Left click on it - or the global
-    hotkey (default Ctrl+Alt+R) - opens a search popup listing everything found in
+    hotkey (default Win+R, taken over from the Windows Run box) - opens a search
+    popup listing everything found in
     the configured sources (default D:\start). Subdirectories are groups; with more
     than one source the source name is shown in front of the group.
 
@@ -420,9 +421,16 @@ $defaultConfig = [ordered]@{
     )
     # folder the tray menu is built from; empty means the built-in menu only
     menuDir      = ''
-    hotkey       = 'Ctrl+Alt+R'
+    # Win+R on purpose: it is the key people already press when they want to
+    # start something by typing its name, and this does that better. Windows
+    # keeps the combination for its own Run dialog, so RegisterHotKey refuses it
+    # and the keyboard hook below takes it instead - the press is swallowed
+    # before Explorer sees it, so the Run box no longer appears. Ctrl+Alt+R and
+    # hookReserved = false are one edit away in Settings for anybody who wants
+    # the Run box back.
+    hotkey       = 'Win+R'
     # answer combinations Windows keeps for itself (Win+R, ...) with a keyboard hook
-    hookReserved = $false
+    hookReserved = $true
     runAtLogon   = $false
     width        = 700
     rows         = 14

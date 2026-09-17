@@ -43,7 +43,11 @@ Other parameters: `-ShowConsole` keeps the console visible for debugging.
 
 ## Using the popup
 
-- **hotkey** - default `Ctrl+Alt+R`, opens and closes the popup
+- **hotkey** - default `Win+R`, opens and closes the popup. That is the combination
+  Windows uses for its Run dialog, and QuickLaunch takes it over: `hookReserved` is on
+  by default, so the press is swallowed by the keyboard hook before Explorer sees it
+  and the Run box no longer appears. Set the hotkey to something else, or turn
+  `hookReserved` off, and Run comes straight back.
 - **typing** - filters the list; several words all have to match
 - **Up / Down** - move the selection, **Enter** - run it (the first entry when nothing was moved)
 - **Shift+Enter** - run the selected entry *with parameters*: the search box turns into an
@@ -174,8 +178,8 @@ the changes up.
     { "path": "D:\\start", "include": "", "exclude": "", "shortcut": "" }
   ],
   "menuDir": "",
-  "hotkey": "Ctrl+Alt+R",
-  "hookReserved": false,
+  "hotkey": "Win+R",
+  "hookReserved": true,
   "runAtLogon": false,
   "width": 700,
   "rows": 14,
