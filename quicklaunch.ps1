@@ -2177,8 +2177,13 @@ function Hide-Launcher {
 function Get-FolderSignature {
     $parts = foreach ($root in (Get-EffectiveSources).Path) {
         if (-not (Test-Path -LiteralPath $root)) { "missing:$root"; continue }
-        $dirs = @(Get-Item -LiteralPath $root) +
-                @(Get-ChildItem -LiteralPath $root -Recurse -Directory -EA SilentlyContinue)
+        # -Force, because C:\Users\Public\Desktop is a hidden folder and Get-Item
+        # does not return hidden items without it - it throws "Could not find
+        # item" instead, which Test-Path on the line above has just denied. That
+        # killed the whole app at startup on a machine whose all-users desktop
+        # was in the sources, before the tray icon ever appeared.
+        $dirs = @(Get-Item -LiteralPath $root -Force -EA SilentlyContinue) +
+                @(Get-ChildItem -LiteralPath $root -Recurse -Directory -Force -EA SilentlyContinue)
         ($dirs | ForEach-Object { "$($_.FullName)|$($_.LastWriteTimeUtc.Ticks)" }) -join ';'
     }
     ($parts -join '#')
