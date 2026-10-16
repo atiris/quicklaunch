@@ -57,7 +57,9 @@
     source whose shortcut letter is "web" wins over the word, "//" always works.
 
     "=<expression>" turns the box into a calculator ("=(2+3)*4"). The result is shown
-    while it is typed and Enter copies it to the clipboard. Understood are + - * / % ^,
+    while it is typed and Enter copies it to the clipboard. A query made only of an
+    expression with an operator or a bracket ("(2+3)*4") needs no "=": its result is
+    the first row, the matching entries follow. Understood are + - * / % ^,
     brackets, pi, e and sqrt, abs, round, floor, ceiling, truncate, sign, min, max, pow,
     log, log10, exp, sin, cos, tan.
 
@@ -994,6 +996,18 @@ function New-CalcItem([string] $expression) {
     }
 }
 
+# a query made only of a math expression is calculated without the "=" prefix; an
+# operator or a bracket is required, so "2024" or "e" stays an ordinary search
+function Get-InlineCalcItem([string] $text) {
+    $expr = ([string]$text).Trim()
+    try {
+        $kinds = @(Split-CalcTokens $expr | ForEach-Object { $_.Kind })
+        if (-not ($kinds | Where-Object { '+-*/%^('.Contains($_) -and $_.Length -eq 1 })) { return }
+        $null = Invoke-Calc $expr
+    } catch { return }
+    New-CalcItem $expr
+}
+
 function New-DirItem([string] $path) {
     $trim = $path.TrimEnd('\')
     if ($trim -match '^[A-Za-z]:$') {        # a drive root has neither leaf nor parent
@@ -1227,8 +1241,11 @@ function Get-Filtered([string] $rawQuery) {
             [pscustomobject]@{ Item = $i; Score = (Get-Score $i $query) }
         }
     }
-    @($hits | Sort-Object -Property @{E = 'Score'; Descending = $true}, @{E = { $_.Item.Name }} |
-        ForEach-Object { $_.Item })
+    $calc = if ($script:cfg.offerCalc -and $split.Mode -eq 'items' -and -not $split.Shortcut) {
+        Get-InlineCalcItem $rawQuery
+    }
+    @($calc) + @($hits | Sort-Object -Property @{E = 'Score'; Descending = $true}, @{E = { $_.Item.Name }} |
+        ForEach-Object { $_.Item }) | Where-Object { $_ }
 }
 
 # --- icons --------------------------------------------------------------------
@@ -1644,7 +1661,7 @@ function Show-Settings {
     $f.Controls.Add($chkWeb)
 
     $chkCalc = New-Object Windows.Forms.CheckBox
-    $chkCalc.Text = 'Calculate "=<expression>", Enter copies the result'; $chkCalc.AutoSize = $true
+    $chkCalc.Text = 'Calculate expressions, Enter copies the result'; $chkCalc.AutoSize = $true
     $chkCalc.Location = New-Object Drawing.Point(400, $y)
     $chkCalc.Checked = [bool]$script:cfg.offerCalc
     $f.Controls.Add($chkCalc)
@@ -2068,7 +2085,10 @@ function Update-List {
     $list.Items.Clear()
     foreach ($i in (Get-Filtered $search.Text)) { [void]$list.Items.Add($i) }
     $list.EndUpdate()
-    if ($list.Items.Count -gt 0) { $list.SelectedIndex = 0 }
+    if ($list.Items.Count -gt 0) {
+        $list.SelectedIndex = 0
+        if ($list.Items[0].Key.StartsWith('calc:')) { $hint.Text = $script:hintCalc }
+    }
     $rows = [math]::Max(1, [math]::Min([int]$script:cfg.rows, $list.Items.Count))
     $form.Height = $search.Height + ($rows * $rowH) + $hintBar.Height + ($script:padPx * 2)
     $scrollBar.Invalidate()

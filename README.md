@@ -68,6 +68,9 @@ entry.
 | `=<expression>` | calculator, e.g. `=(2+3)*4`; Enter copies the result to the clipboard |
 | `<letter> <text>` | limits the list to the source owning that shortcut letter |
 
+A query made only of a math expression with an operator or a bracket, e.g. `(2+3)*4`,
+needs no `=`: its result is the first row and Enter copies it; the matching entries follow.
+
 Run and web entries are remembered and offered again the next time. The calculator knows
 `+ - * / % ^`, brackets, `pi`, `e` and `sqrt`, `abs`, `round`, `floor`, `ceiling`,
 `truncate`, `sign`, `min`, `max`, `pow`, `log`, `log10`, `exp`, `sin`, `cos`, `tan`.
