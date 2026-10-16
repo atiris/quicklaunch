@@ -56,12 +56,11 @@
     ("//google.com" goes to https://google.com) and remembers it for the next time. A
     source whose shortcut letter is "web" wins over the word, "//" always works.
 
-    "=<expression>" turns the box into a calculator ("=(2+3)*4"). The result is shown
-    while it is typed and Enter copies it to the clipboard. A query made only of an
-    expression with an operator or a bracket ("(2+3)*4") needs no "=": its result is
-    the first row, the matching entries follow. Understood are + - * / % ^,
-    brackets, pi, e and sqrt, abs, round, floor, ceiling, truncate, sign, min, max, pow,
-    log, log10, exp, sin, cos, tan.
+    A query made only of a math expression with an operator or a bracket ("(2+3)*4")
+    is calculated: its result is the first row, Enter copies it to the clipboard and
+    the matching entries follow. Understood are + - * / % ^, brackets, pi, e and sqrt,
+    abs, round, floor, ceiling, truncate, sign, min, max, pow, log, log10, exp, sin, cos,
+    tan.
 
     The script's own commands (open source folder, settings, reload, exit) sit at
     the bottom of the list and are searchable like any other entry.
@@ -782,7 +781,7 @@ function New-WebItem([string] $text) {
 }
 
 # --- calculator ---------------------------------------------------------------
-# "=<expression>" is evaluated by the parser below; the text never reaches
+# a math expression is evaluated by the parser below; the text never reaches
 # Invoke-Expression, so a mistyped query can never turn into a command
 
 function Split-CalcTokens([string] $text) {
@@ -960,32 +959,16 @@ function Format-CalcValue([double] $value) {
 }
 
 function Copy-CalcResult([string] $value) {
-    if (-not $value) { return }
     try { [Windows.Forms.Clipboard]::SetText($value); Log "calc result '$value' copied" }
     catch { Log "cannot copy the result: $($_.Exception.Message)" }
 }
 
 function New-CalcItem([string] $expression) {
-    $expr   = ([string]$expression).Trim()
-    $result = ''
-    $group  = 'Calculator'
-    if (-not $expr) {
-        $name = 'Type an expression, for example  =(2+3)*4'
-    } else {
-        try {
-            $result = Format-CalcValue (Invoke-Calc $expr)
-            $name   = "$expr = $result"
-            $group  = 'Enter copies the result'
-        } catch {
-            $name  = $expr
-            $group = $_.Exception.Message
-        }
-    }
-    $r = $result
+    $r = Format-CalcValue (Invoke-Calc $expression)
     [pscustomobject]@{
-        Key      = "calc:$expr"
-        Name     = $name
-        Group    = $group
+        Key      = "calc:$expression"
+        Name     = "$expression = $r"
+        Group    = 'Enter copies the result'
         Path     = ''
         IconFile = ''
         Command  = { Copy-CalcResult $r }.GetNewClosure()
@@ -996,16 +979,15 @@ function New-CalcItem([string] $expression) {
     }
 }
 
-# a query made only of a math expression is calculated without the "=" prefix; an
-# operator or a bracket is required, so "2024" or "e" stays an ordinary search
+# a query made only of a math expression is calculated; an operator or a bracket is
+# required, so "2024" or "e" stays an ordinary search
 function Get-InlineCalcItem([string] $text) {
     $expr = ([string]$text).Trim()
     try {
         $kinds = @(Split-CalcTokens $expr | ForEach-Object { $_.Kind })
         if (-not ($kinds | Where-Object { '+-*/%^('.Contains($_) -and $_.Length -eq 1 })) { return }
-        $null = Invoke-Calc $expr
-    } catch { return }
-    New-CalcItem $expr
+        New-CalcItem $expr
+    } catch { }
 }
 
 function New-DirItem([string] $path) {
@@ -1175,7 +1157,6 @@ function New-QuerySplit([string] $mode, [string] $text = '', [string] $shortcut 
 }
 
 # Modes recognised at the start of the query:
-#   "=<expr>"                        calculator
 #   "run <cmd>" / "!<cmd>"           shell command
 #   "web <url>" / "//<url>"          browser
 #   "dir <text>" / "cd <text>" / "..<text>"   folder list instead of the entries
@@ -1183,10 +1164,6 @@ function New-QuerySplit([string] $mode, [string] $text = '', [string] $shortcut 
 function Split-Query([string] $raw) {
     $text = ($raw ?? '').Trim()
     # a command keeps its capitals and its diacritics, so it is taken from the raw text
-    if ($script:cfg.offerCalc) {
-        $m = [regex]::Match($text, '^=\s*(?<rest>.*)$')
-        if ($m.Success) { return (New-QuerySplit 'calc' $m.Groups['rest'].Value.Trim()) }
-    }
     if ($script:cfg.offerRun) {
         $m = [regex]::Match($text, '^(?i)(run\b|!)\s*(?<rest>.*)$')
         if ($m.Success) { return (New-QuerySplit 'run' $m.Groups['rest'].Value.Trim()) }
@@ -1230,7 +1207,6 @@ function Get-Filtered([string] $rawQuery) {
     switch ($split.Mode) {
         'run'  { return @(Get-HistoryItems 'run:' $split.Text { param($c) New-RunItem $c }) }
         'web'  { return @(Get-HistoryItems 'web:' $split.Text { param($c) New-WebItem $c }) }
-        'calc' { return @(New-CalcItem $split.Text) }
     }
     $query  = $split.Query
     $pool   = if ($split.Mode -eq 'dirs') { Get-DirPool } else { $script:items }
@@ -1959,7 +1935,7 @@ $hint.Height    = [int][math]::Max(18, $fSize * 1.8)
 $hint.ForeColor = $colDim
 $hint.Font      = New-Object Drawing.Font($fontName, ($fSize - 1.5))
 $hint.TextAlign = 'MiddleLeft'
-$script:hintDefault = '  Enter run   Shift+Enter parameters   ".." folders   "!" command   "//" web   "=" calc   Esc close'
+$script:hintDefault = '  Enter run   Shift+Enter parameters   ".." folders   "!" command   "//" web   Esc close'
 $script:hintCalc    = '  Enter copies the result   + - * / % ^ ( ) pi e sqrt round min max log ...   Esc close'
 $script:hintWeb     = '  Enter opens it in the browser   Esc close'
 $script:dirPool  = $null
@@ -2077,7 +2053,6 @@ $list.Add_DrawItem({
 function Update-List {
     if ($script:argMode) { return }   # the box holds arguments, not a search
     $hint.Text = switch ((Split-Query $search.Text).Mode) {
-        'calc'  { $script:hintCalc }
         'web'   { $script:hintWeb }
         default { $script:hintDefault }
     }
