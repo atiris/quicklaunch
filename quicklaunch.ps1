@@ -575,6 +575,14 @@ function Read-Config {
     $cfg
 }
 
+# written next to the target first and then swapped in, so a crash or power loss in
+# the middle of a write never leaves a truncated file that would reset everything
+function Write-TextFile([string] $path, [string] $text) {
+    $tmp = "$path.tmp"
+    Set-Content -LiteralPath $tmp -Value $text -Encoding utf8
+    Move-Item -LiteralPath $tmp -Destination $path -Force
+}
+
 function Save-Config($cfg) {
     $out = [ordered]@{}
     foreach ($k in $defaultConfig.Keys) { $out[$k] = $cfg[$k] }
@@ -582,7 +590,7 @@ function Save-Config($cfg) {
     # object instead of an array
     $out['sources'] = @($cfg['sources'])
     $out['dirs']    = @($cfg['dirs'])
-    ($out | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $configPath -Encoding utf8
+    Write-TextFile $configPath ($out | ConvertTo-Json -Depth 5)
 }
 
 # every source as it is actually used: absolute path, filters resolved against the
@@ -644,7 +652,7 @@ function Read-Usage {
 }
 
 function Save-Usage {
-    try { ($script:usage | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $usagePath -Encoding utf8 }
+    try { Write-TextFile $usagePath ($script:usage | ConvertTo-Json -Depth 5) }
     catch { Log "cannot save usage: $($_.Exception.Message)" }
 }
 
