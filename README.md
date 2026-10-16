@@ -52,11 +52,19 @@ Other parameters: `-ShowConsole` keeps the console visible for debugging.
 - **Up / Down** - move the selection, **Enter** - run it (the first entry when nothing was moved)
 - **Shift+Enter** - run the selected entry *with parameters*: the search box turns into an
   argument box, pre-filled with the arguments used last time for that entry
+- **Ctrl+Shift+Enter** - run the selected entry as administrator
+- **Ctrl+Enter** - open the folder holding the selected entry, with it selected; for a
+  shortcut, the folder of its target
+- **Ctrl+C** - copy the selected entry's full path (when no text is selected in the box)
 - **Escape** - hide the popup (also hides itself when it loses focus)
 
 Subdirectories of a source become groups. The script's own commands (open source folder,
-settings, reload, exit) sit at the bottom of the list and are searchable like any other
-entry.
+settings, exit) sit at the bottom of the list and are searchable like any other entry.
+
+The popup opens without any work: the entry list of the last run is cached on disk, and
+while the popup is hidden the app checks the sources every 10 seconds for new or removed
+entries and prepares the list the next popup opens with. An entry deleted in the meantime
+disappears with that check; there is nothing to reload by hand.
 
 ### Prefixes
 
@@ -64,6 +72,7 @@ entry.
 | --- | --- |
 | `run <cmd>`, `!<cmd>` | hands the text to the shell, exactly like the Win+R box |
 | `web <url>`, `//<url>` | opens the text as a URL (`//google.com` -> `https://google.com`) |
+| `<keyword> <text>` | web search from the `webSearches` templates: `g`, `yt`, `wiki` by default |
 | `dir <text>`, `cd <text>`, `..<text>` | searches folders instead of entries, opens the chosen one in Explorer |
 | `<letter> <text>` | limits the list to the source owning that shortcut letter |
 
@@ -94,8 +103,7 @@ ends up first the next time you type `cc`.
 
 ## Tray menu
 
-Right-clicking the tray icon opens *Open launcher*, *Open settings*, *Reload settings and
-lists* and *Exit launcher*.
+Right-clicking the tray icon opens *Open launcher*, *Open settings* and *Exit launcher*.
 
 Set a **Custom menu folder** in the settings and that folder is put on top of the menu:
 
@@ -125,8 +133,24 @@ The menu is rebuilt every time it is opened, so changes in the folder show up at
 
 Everything is edited in the built-in settings window - tray menu *Open settings*, the gear
 at the bottom right of the popup, or the *Settings* entry in the list. It covers sources,
-hotkey, sizes, colours, the custom menu folder and the `dir` folder list; a button adds the
-Start Menu folders as sources.
+hotkey, sizes, colours, the custom menu folder, the `dir` folder list and the web search
+keywords; a button adds the Start Menu folders as sources. *Open settings file* opens the
+JSON file itself, which is all an export or a backup needs.
+
+### System shortcuts
+
+*Add system shortcuts...* writes a default set of shortcuts into a folder (by default
+`System` in the first source): Lock, Sleep, Hibernate, Restart, Shut down, Sign out, Empty
+recycle bin, Windows Settings, Task Manager, Control Panel, Device Manager, Services,
+Installed apps, Network connections and Environment variables. They are ordinary `.lnk`
+files, so they can be renamed, given alternative names or deleted. A name already in the
+folder is left alone.
+
+### Web searches
+
+`"webSearches"` maps a keyword to a URL with `{q}` where the typed text goes. Typing the
+keyword, a space and the text offers the search as the only entry. A source shortcut with
+the same name wins over the keyword.
 
 The popup draws its own scrollbar, so its track (`scrollBack`) and thumb (`scrollBar`) are
 ordinary colours in the settings like every other one.
@@ -169,10 +193,11 @@ Nothing is ever written next to the script.
 | Config | `%LOCALAPPDATA%\QuickLaunch\quicklaunch.config.json` (created on first run) |
 | Usage | `%LOCALAPPDATA%\QuickLaunch\quicklaunch.usage.json` |
 | Icons | `%LOCALAPPDATA%\QuickLaunch\cache\icons` |
+| Cache | `%LOCALAPPDATA%\QuickLaunch\cache` - entry list of the last run, compiled helper DLL |
 | Log | `<parent of the script folder>\logs\quicklaunch.log` |
 
-The config can also be edited by hand; *Reload settings and list* in the tray menu picks
-the changes up.
+The config can also be edited by hand; the app notices the change within a second and
+applies it.
 
 ```json
 {
@@ -196,6 +221,11 @@ the changes up.
   "offerRun": true,
   "offerWeb": true,
   "offerCalc": true,
+  "webSearches": {
+    "g": "https://www.google.com/search?q={q}",
+    "yt": "https://www.youtube.com/results?search_query={q}",
+    "wiki": "https://en.wikipedia.org/w/index.php?search={q}"
+  },
   "colors": {
     "background": "#202020",
     "text": "#F0F0F0",

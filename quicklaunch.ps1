@@ -62,10 +62,23 @@
     abs, round, floor, ceiling, truncate, sign, min, max, pow, log, log10, exp, sin, cos,
     tan.
 
-    The script's own commands (open source folder, settings, reload, exit) sit at
-    the bottom of the list and are searchable like any other entry.
+    "<keyword> <text>" searches the web with a template from the "webSearches" setting
+    ("g text" -> Google, "yt text" -> YouTube, "wiki text" -> Wikipedia).
 
-    The tray icon's right-click menu holds open launcher, open settings, reload and exit.
+    Ctrl+Enter opens the folder holding the selected entry (a shortcut's target folder),
+    Ctrl+Shift+Enter starts it as administrator, Ctrl+C copies its path.
+
+    The script's own commands (open source folder, settings, exit) sit at the bottom of
+    the list and are searchable like any other entry. The settings window can write a
+    default set of system shortcuts (lock, sleep, restart, shut down, ...) into a folder
+    as ordinary .lnk files.
+
+    The entry list of the last run is cached, so the popup is ready the moment the app
+    starts. While the popup is hidden the app checks the sources for new or removed
+    entries every few seconds, picks up hand edits of the config file and prepares the
+    list the next popup opens with.
+
+    The tray icon's right-click menu holds open launcher, open settings and exit.
     With a "Custom menu folder" set in the settings it also becomes a menu of that folder:
     subfolders turn into submenus, files matching the global include/exclude filters turn
     into entries, and "[1]" anywhere in a name sets the order (numbered names first in
@@ -78,6 +91,7 @@
     Config  : %LOCALAPPDATA%\QuickLaunch\quicklaunch.config.json  (created on first run)
     Usage   : %LOCALAPPDATA%\QuickLaunch\quicklaunch.usage.json
     Icons   : %LOCALAPPDATA%\QuickLaunch\cache\icons
+    Cache   : %LOCALAPPDATA%\QuickLaunch\cache  (entry list, compiled helper DLL)
     Log     : <parent of the script folder>\logs\quicklaunch.log
 
 .PARAMETER Install
@@ -189,7 +203,7 @@ if (-not $created) {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-Add-Type @'
+$nativeSource = @'
 using System;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
@@ -404,8 +418,29 @@ public class QlProbe : NativeWindow, IDisposable {
         }
     }
 }
-'@ -ReferencedAssemblies System.Windows.Forms, System.Windows.Forms.Primitives, System.Drawing,
-                          System.ComponentModel.Primitives, System.ObjectModel, System.Drawing.Primitives
+'@
+$nativeRefs = @('System.Windows.Forms', 'System.Windows.Forms.Primitives', 'System.Drawing',
+                'System.ComponentModel.Primitives', 'System.ObjectModel', 'System.Drawing.Primitives')
+
+# Compiling the helper costs ~300 ms on every start, loading a compiled DLL ~7 ms. The DLL
+# name carries a hash of the source and the PowerShell version, so any change compiles anew.
+$nativeKey  = [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes("$nativeSource|$($PSVersionTable.PSVersion)"))
+$nativeDir  = Join-Path $dataDir 'cache'
+$nativeDll  = Join-Path $nativeDir ('qlnative-' + [BitConverter]::ToString($nativeKey, 0, 8).Replace('-', '') + '.dll')
+try {
+    if (-not (Test-Path -LiteralPath $nativeDll)) {
+        New-Item -ItemType Directory -Path $nativeDir -Force | Out-Null
+        Get-ChildItem -LiteralPath $nativeDir -Filter 'qlnative-*' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
+        Add-Type -TypeDefinition $nativeSource -ReferencedAssemblies $nativeRefs -OutputAssembly "$nativeDll.tmp"
+        Move-Item -LiteralPath "$nativeDll.tmp" -Destination $nativeDll -Force
+    }
+    Add-Type -Path $nativeDll
+} catch {
+    # a broken DLL must never keep the app from starting; it is rebuilt on the next start
+    Log "compiled helper unusable, compiling in memory: $($_.Exception.Message)"
+    Remove-Item -LiteralPath $nativeDll -Force -EA SilentlyContinue
+    Add-Type -TypeDefinition $nativeSource -ReferencedAssemblies $nativeRefs
+}
 
 if (-not $ShowConsole) { [QlNative]::HideConsole() }
 
@@ -450,6 +485,12 @@ $defaultConfig = [ordered]@{
     offerRun     = $true
     offerWeb     = $true
     offerCalc    = $true
+    # "<keyword> <text>" opens the template with {q} replaced by the text
+    webSearches  = [ordered]@{
+        g    = 'https://www.google.com/search?q={q}'
+        yt   = 'https://www.youtube.com/results?search_query={q}'
+        wiki = 'https://en.wikipedia.org/w/index.php?search={q}'
+    }
     # every colour of the popup, as #RRGGBB
     colors       = [ordered]@{
         background = '#202020'
@@ -501,6 +542,21 @@ function Get-CfgColor([string] $key) {
         }
     }
     ConvertTo-Color $val (ConvertTo-Color $def ([Drawing.Color]::Gray))
+}
+
+# keyword -> URL template, from the default hashtable or a JSON object
+function Get-WebSearches {
+    $out = @{}
+    $map = $script:cfg['webSearches']
+    if (-not $map) { return $out }
+    $pairs = if ($map -is [System.Collections.IDictionary]) { $map.GetEnumerator() }
+             else { $map.PSObject.Properties | ForEach-Object { @{ Key = $_.Name; Value = $_.Value } } }
+    foreach ($p in $pairs) {
+        $k = ([string]$p.Key).Trim().ToLowerInvariant()
+        $v = ([string]$p.Value).Trim()
+        if ($k -and $v) { $out[$k] = $v }
+    }
+    $out
 }
 
 # "*.lnk; *.exe" -> @('*.lnk', '*.exe')
@@ -670,6 +726,7 @@ function Add-Usage($key, $query, $arguments) {
         $e.queries[$q] = [int]$e.queries[$q] + 1
     }
     Save-Usage
+    $script:emptyList = $null
 }
 
 $script:usage = Read-Usage
@@ -769,6 +826,25 @@ function Start-WebUrl([string] $text) {
         Log "cannot open url: $($_.Exception.Message)"
         [Windows.Forms.MessageBox]::Show("Cannot open:`n$url`n`n$($_.Exception.Message)",
             'QuickLaunch', 'OK', 'Warning') | Out-Null
+    }
+}
+
+function New-SearchItem([string] $keyword, [string] $text) {
+    $tpl = (Get-WebSearches)[$keyword]
+    $q   = [Uri]::EscapeDataString($text)
+    $url = if ($tpl.Contains('{q}')) { $tpl.Replace('{q}', $q) } else { $tpl + $q }
+    $hostName = try { ([Uri](Resolve-WebUrl $url)).Host } catch { $keyword }
+    [pscustomobject]@{
+        Key      = "search:$keyword $text"
+        Name     = $text
+        Group    = "Search $hostName"
+        Path     = ''
+        IconFile = ''
+        Command  = { Start-WebUrl $url }.GetNewClosure()
+        Aliases  = @()
+        Search   = ''
+        NameNorm = ''
+        Shortcut = ''
     }
 }
 
@@ -1047,7 +1123,7 @@ function Get-DirPool {
     $script:dirPool
 }
 
-function Get-Items {
+function Get-FileItems {
     $sources = @(Get-EffectiveSources)
     $items   = @()
     $multi   = $sources.Count -gt 1
@@ -1096,15 +1172,58 @@ function Get-Items {
         if ($kept.Count -ne $items.Count) { Log "duplicates dropped: $($items.Count - $kept.Count)" }
         $items = $kept
     }
+    $items
+}
 
-    foreach ($src in $sources) {
+function Get-CommandItems {
+    $items = @()
+    foreach ($src in @(Get-EffectiveSources)) {
         $r = $src.Path
         $items += New-CommandItem "openroot:$r" "Open folder $r" 'QuickLaunch' { Start-Process explorer.exe $r }.GetNewClosure()
     }
     $items += New-CommandItem 'settings'  'Settings'                 'QuickLaunch' { Show-Settings }
-    $items += New-CommandItem 'reload'    'Reload settings and list' 'QuickLaunch' { Reset-Config }
     $items += New-CommandItem 'exit'      'Exit QuickLaunch'         'QuickLaunch' { Stop-QuickLaunch }
     $items
+}
+
+# The entry list of the last run is kept on disk, so the popup works the moment the app is
+# up; the real folder scan follows in the background. An entry that is gone by then simply
+# disappears with the next refresh.
+$script:itemsCachePath = Join-Path $dataDir 'cache\items.json'
+$script:cacheFields    = @('Key', 'Name', 'Group', 'Path', 'IconFile', 'Aliases', 'Search', 'NameNorm', 'Shortcut')
+
+function Save-ItemsCache {
+    try {
+        $rows = @($script:fileItems | Select-Object -Property $script:cacheFields)
+        Write-TextFile $script:itemsCachePath (@{ sig = $script:itemsSig; items = $rows } | ConvertTo-Json -Depth 4 -Compress)
+    } catch { Log "cannot save the entry cache: $($_.Exception.Message)" }
+}
+
+function Read-ItemsCache {
+    if (-not (Test-Path -LiteralPath $script:itemsCachePath)) { return $false }
+    try {
+        $raw = Get-Content -LiteralPath $script:itemsCachePath -Raw -Encoding utf8 | ConvertFrom-Json
+        $script:fileItems = @(foreach ($r in @($raw.items)) {
+            [pscustomobject]@{
+                Key      = [string]$r.Key
+                Name     = [string]$r.Name
+                Group    = [string]$r.Group
+                Path     = [string]$r.Path
+                IconFile = [string]$r.IconFile
+                Command  = $null
+                Aliases  = @($r.Aliases | Where-Object { $_ } | ForEach-Object { [string]$_ })
+                Search   = [string]$r.Search
+                NameNorm = [string]$r.NameNorm
+                Shortcut = [string]$r.Shortcut
+            }
+        })
+        $script:itemsSig = [string]$raw.sig
+        $script:items    = @($script:fileItems) + @(Get-CommandItems)
+        return $true
+    } catch {
+        Log "entry cache unreadable: $($_.Exception.Message)"
+        return $false
+    }
 }
 
 # --- ranking ------------------------------------------------------------------
@@ -1160,13 +1279,15 @@ function Test-SourceShortcut([string] $name) {
     $known -contains $name
 }
 
-function New-QuerySplit([string] $mode, [string] $text = '', [string] $shortcut = '', [string] $query = '') {
-    @{ Mode = $mode; Text = $text; Shortcut = $shortcut; Query = $query }
+function New-QuerySplit([string] $mode, [string] $text = '', [string] $shortcut = '', [string] $query = '',
+                        [string] $keyword = '') {
+    @{ Mode = $mode; Text = $text; Shortcut = $shortcut; Query = $query; Keyword = $keyword }
 }
 
 # Modes recognised at the start of the query:
 #   "run <cmd>" / "!<cmd>"           shell command
 #   "web <url>" / "//<url>"          browser
+#   "<keyword> <text>"               web search from the "webSearches" templates
 #   "dir <text>" / "cd <text>" / "..<text>"   folder list instead of the entries
 #   "<shortcut> <text>"              only the entries of the source owning that shortcut
 function Split-Query([string] $raw) {
@@ -1181,6 +1302,14 @@ function Split-Query([string] $raw) {
         # a source shortcut named "web" wins over the word; "//" is always the browser
         if ($m.Success -and ($m.Groups['kw'].Value -eq '//' -or -not (Test-SourceShortcut 'web'))) {
             return (New-QuerySplit 'web' $m.Groups['rest'].Value.Trim())
+        }
+    }
+    # a source shortcut with the same name wins over a search keyword
+    $m = [regex]::Match($text, '^(?<kw>\S+)\s+(?<rest>.+)$')
+    if ($m.Success) {
+        $kw = $m.Groups['kw'].Value.ToLowerInvariant()
+        if ((Get-WebSearches).ContainsKey($kw) -and -not (Test-SourceShortcut $kw)) {
+            return (New-QuerySplit 'search' $m.Groups['rest'].Value.Trim() '' '' $kw)
         }
     }
     $q = (Remove-Diacritics $text).ToLowerInvariant()
@@ -1215,6 +1344,7 @@ function Get-Filtered([string] $rawQuery) {
     switch ($split.Mode) {
         'run'  { return @(Get-HistoryItems 'run:' $split.Text { param($c) New-RunItem $c }) }
         'web'  { return @(Get-HistoryItems 'web:' $split.Text { param($c) New-WebItem $c }) }
+        'search' { return @(New-SearchItem $split.Keyword $split.Text) }
     }
     $query  = $split.Query
     $pool   = if ($split.Mode -eq 'dirs') { Get-DirPool } else { $script:items }
@@ -1304,10 +1434,29 @@ function Complete-IconWorker {
 
 # --- launching ----------------------------------------------------------------
 
-function Invoke-Entry($item, [string] $query, [string] $arguments) {
+# true when the user said No to the UAC prompt - that is a decision, not a failure
+function Test-UserCancelled($exception) {
+    for ($e = $exception; $e; $e = $e.InnerException) {
+        if ($e -is [ComponentModel.Win32Exception] -and $e.NativeErrorCode -eq 1223) { return $true }
+    }
+    $false
+}
+
+# ShellExecute, like a double click; "runas" asks for administrator rights
+function Start-Shell([string] $file, [string] $arguments, [string] $workDir, [switch] $Elevated) {
+    $psi = New-Object Diagnostics.ProcessStartInfo $file
+    $psi.UseShellExecute = $true
+    if ($arguments) { $psi.Arguments = $arguments }
+    if ($workDir)   { $psi.WorkingDirectory = $workDir }
+    if ($Elevated)  { $psi.Verb = 'runas' }
+    $p = [Diagnostics.Process]::Start($psi)
+    if ($p) { $p.Dispose() }
+}
+
+function Invoke-Entry($item, [string] $query, [string] $arguments, [switch] $Elevated) {
     Hide-Launcher
-    # a calculation is never repeated, so it stays out of the usage file
-    if (-not $item.Key.StartsWith('calc:')) { Add-Usage $item.Key $query $arguments }
+    # a calculation or a web search is never repeated, so it stays out of the usage file
+    if ($item.Key -notmatch '^(calc|search):') { Add-Usage $item.Key $query $arguments }
     if ($item.Command) {
         try { & $item.Command } catch { Log "command $($item.Key) failed: $($_.Exception.Message)" }
         return
@@ -1317,27 +1466,25 @@ function Invoke-Entry($item, [string] $query, [string] $arguments) {
         Start-Process explorer.exe "`"$($item.Path.TrimEnd('\'))`""
         return
     }
-    Log "launch $($item.Path)  (query '$query', args '$arguments')"
-    # ShellExecute passes arguments through to a shortcut's target as well
-    $extra = @{}
-    if ($arguments) { $extra['ArgumentList'] = $arguments }
+    Log "launch $($item.Path)  (query '$query', args '$arguments', elevated $([bool]$Elevated))"
     try {
+        # ShellExecute passes arguments through to a shortcut's target as well
         switch -Wildcard ($item.Path) {
             '*.ps1' {
-                $psArgs = @('-NoProfile', '-File', $item.Path)
-                if ($arguments) { $psArgs += $arguments }
-                Start-Process (Get-Process -Id $PID).Path -ArgumentList $psArgs `
-                    -WorkingDirectory (Split-Path -Parent $item.Path)
+                $psArgs = "-NoProfile -File `"$($item.Path)`""
+                if ($arguments) { $psArgs += " $arguments" }
+                Start-Shell (Get-Process -Id $PID).Path $psArgs (Split-Path -Parent $item.Path) -Elevated:$Elevated
             }
             { $_ -like '*.lnk' -or $_ -like '*.url' } {
                 # a shortcut carries its own "start in" - overriding it breaks the target app
-                Start-Process -FilePath $item.Path @extra
+                Start-Shell $item.Path $arguments '' -Elevated:$Elevated
             }
             default {
-                Start-Process -FilePath $item.Path -WorkingDirectory (Split-Path -Parent $item.Path) @extra
+                Start-Shell $item.Path $arguments (Split-Path -Parent $item.Path) -Elevated:$Elevated
             }
         }
     } catch {
+        if (Test-UserCancelled $_.Exception) { Log 'launch cancelled at the UAC prompt'; return }
         Log "launch failed, retrying through the shell: $($_.Exception.Message)"
         try {
             # same as double-clicking the entry in Explorer
@@ -1348,6 +1495,75 @@ function Invoke-Entry($item, [string] $query, [string] $arguments) {
                 'QuickLaunch', 'OK', 'Warning') | Out-Null
         }
     }
+}
+
+# Ctrl+Enter: the folder holding the entry, with it selected; a shortcut shows its target
+function Show-InFolder($item) {
+    $target = [string]$item.Path
+    if (-not $target) { return }
+    Hide-Launcher
+    if ($target -like '*.lnk') {
+        try {
+            $link = (New-Object -ComObject WScript.Shell).CreateShortcut($target)
+            if ($link.TargetPath -and (Test-Path -LiteralPath $link.TargetPath)) { $target = $link.TargetPath }
+        } catch { }
+    }
+    Log "show in folder $target"
+    Start-Process explorer.exe "/select,`"$($target.TrimEnd('\'))`""
+}
+
+# Ctrl+C with nothing selected in the search box: the entry's full path
+function Copy-EntryPath($item) {
+    if (-not $item.Path) { return }
+    try {
+        [Windows.Forms.Clipboard]::SetText([string]$item.Path)
+        $hint.Text = "  Copied: $($item.Path)"
+    } catch { Log "cannot copy the path: $($_.Exception.Message)" }
+}
+
+# Settings window button: the default system shortcuts written as ordinary .lnk files,
+# so they can be renamed and given alternative names like any other entry
+$script:systemShortcuts = @(
+    @{ Name = 'Lock [lock screen]';              File = 'rundll32.exe'; Args = 'user32.dll,LockWorkStation' }
+    @{ Name = 'Sleep [suspend]';                 File = 'WindowsPowerShell\v1.0\powershell.exe'; Hidden = $true
+       Args = '-NoProfile -WindowStyle Hidden -Command "Add-Type -AssemblyName System.Windows.Forms; [void][Windows.Forms.Application]::SetSuspendState(''Suspend'', $false, $false)"' }
+    @{ Name = 'Hibernate';                       File = 'shutdown.exe'; Args = '/h'; Hidden = $true }
+    @{ Name = 'Restart [reboot]';                File = 'shutdown.exe'; Args = '/r /t 0'; Hidden = $true }
+    @{ Name = 'Shut down [shutdown, power off]'; File = 'shutdown.exe'; Args = '/s /t 0'; Hidden = $true }
+    @{ Name = 'Sign out [log off, logout]';      File = 'shutdown.exe'; Args = '/l'; Hidden = $true }
+    @{ Name = 'Empty recycle bin [trash]';       File = 'WindowsPowerShell\v1.0\powershell.exe'; Hidden = $true
+       Args = '-NoProfile -WindowStyle Hidden -Command "Add-Type -AssemblyName System.Windows.Forms; if ([Windows.Forms.MessageBox]::Show(''Empty the recycle bin?'', ''Recycle bin'', ''YesNo'', ''Question'') -eq ''Yes'') { Clear-RecycleBin -Force }"' }
+    @{ Name = 'Windows Settings [settings]';     File = 'explorer.exe'; Args = 'ms-settings:' }
+    @{ Name = 'Task Manager [taskmgr]';          File = 'taskmgr.exe'; Args = '' }
+    @{ Name = 'Control Panel [control]';         File = 'control.exe'; Args = '' }
+    @{ Name = 'Device Manager [devmgmt]';        File = 'mmc.exe'; Args = 'devmgmt.msc' }
+    @{ Name = 'Services [services.msc]';         File = 'mmc.exe'; Args = 'services.msc' }
+    @{ Name = 'Installed apps [programs, uninstall]'; File = 'explorer.exe'; Args = 'ms-settings:appsfeatures' }
+    @{ Name = 'Network connections [ncpa]';      File = 'control.exe'; Args = 'ncpa.cpl' }
+    @{ Name = 'Environment variables [env]';     File = 'rundll32.exe'; Args = 'sysdm.cpl,EditEnvironmentVariables' }
+)
+
+# returns how many shortcuts were written; a name that is already there, with or without
+# alternative names, is left alone
+function Add-SystemShortcuts([string] $folder) {
+    New-Item -ItemType Directory -Path $folder -Force | Out-Null
+    $have = @(Get-ChildItem -LiteralPath $folder -File -EA SilentlyContinue |
+        ForEach-Object { (Split-EntryName $_.BaseName).Name.ToLowerInvariant() })
+    $shell = New-Object -ComObject WScript.Shell
+    $sys   = [Environment]::GetFolderPath('System')
+    $added = 0
+    foreach ($d in $script:systemShortcuts) {
+        if ($have -contains (Split-EntryName $d.Name).Name.ToLowerInvariant()) { continue }
+        $exe  = if ($d.File -eq 'explorer.exe') { Join-Path $env:WINDIR 'explorer.exe' } else { Join-Path $sys $d.File }
+        $link = $shell.CreateShortcut((Join-Path $folder "$($d.Name).lnk"))
+        $link.TargetPath = $exe
+        $link.Arguments  = $d.Args
+        if ($d.Hidden) { $link.WindowStyle = 7 }      # minimized: no console in the way
+        $link.Save()
+        $added++
+    }
+    Log "system shortcuts added to ${folder}: $added"
+    $added
 }
 
 # --- settings window ----------------------------------------------------------
@@ -1466,6 +1682,24 @@ function Show-Settings {
         foreach ($r in @($grid.SelectedRows)) { $grid.Rows.Remove($r) }
     })
     $f.Controls.Add($btnDel)
+
+    $btnSys = New-Object Windows.Forms.Button
+    $btnSys.Text = 'Add system shortcuts...'; $btnSys.Width = 170
+    $btnSys.Location = New-Object Drawing.Point(536, $btnY)
+    $btnSys.Add_Click({
+        $d = New-Object Windows.Forms.FolderBrowserDialog
+        $d.Description = 'Folder for Lock, Sleep, Restart, Shut down, ... (existing names are kept)'
+        $first = @($grid.Rows | ForEach-Object { ([string]$_.Cells[0].Value).Trim() } | Where-Object { $_ }) | Select-Object -First 1
+        if ($first) { $d.SelectedPath = Join-Path $first 'System' }
+        if ($d.ShowDialog() -ne 'OK') { return }
+        try {
+            $n = Add-SystemShortcuts $d.SelectedPath
+            [Windows.Forms.MessageBox]::Show("$n shortcuts added to`n$($d.SelectedPath)", 'QuickLaunch', 'OK', 'Information') | Out-Null
+        } catch {
+            [Windows.Forms.MessageBox]::Show("Shortcuts cannot be added:`n$($_.Exception.Message)", 'QuickLaunch', 'OK', 'Error') | Out-Null
+        }
+    })
+    $f.Controls.Add($btnSys)
 
 
     # --- hotkey
@@ -1710,15 +1944,38 @@ function Show-Settings {
 
     # --- folders
     $y = 692
-    $f.Controls.Add((New-SettingsLabel 'Folders, one per line ("D:\work\*" means every subfolder)' 12 $y))
+    $f.Controls.Add((New-SettingsLabel 'Folders, one per line ("D:\work\*" = every subfolder)' 12 $y))
     $txtDirs = New-Object Windows.Forms.TextBox
     $txtDirs.Multiline  = $true
     $txtDirs.ScrollBars = 'Vertical'
     $txtDirs.WordWrap   = $false
     $txtDirs.Text       = (@($script:cfg.dirs) -join "`r`n")
     $txtDirs.Location   = New-Object Drawing.Point(12, ($y + 22))
-    $txtDirs.Size       = New-Object Drawing.Size(806, 90)
+    $txtDirs.Size       = New-Object Drawing.Size(395, 90)
     $f.Controls.Add($txtDirs)
+
+    # --- web search keywords
+    $f.Controls.Add((New-SettingsLabel 'Web searches, "keyword = URL" with {q} for the text' 418 $y))
+    $txtSearch = New-Object Windows.Forms.TextBox
+    $txtSearch.Multiline  = $true
+    $txtSearch.ScrollBars = 'Vertical'
+    $txtSearch.WordWrap   = $false
+    $webSearches = Get-WebSearches
+    $txtSearch.Text       = (@($webSearches.Keys | Sort-Object | ForEach-Object { "$_ = $($webSearches[$_])" }) -join "`r`n")
+    $txtSearch.Location   = New-Object Drawing.Point(418, ($y + 22))
+    $txtSearch.Size       = New-Object Drawing.Size(400, 90)
+    $f.Controls.Add($txtSearch)
+
+    # --- export
+    # the settings live in one JSON file, so "export" is opening it
+    $btnFile = New-Object Windows.Forms.Button
+    $btnFile.Text = 'Open settings file'; $btnFile.Width = 140
+    $btnFile.Location = New-Object Drawing.Point(12, 812)
+    $btnFile.Add_Click({
+        try { Start-Process -FilePath $configPath }
+        catch { Start-Process notepad.exe "`"$configPath`"" }
+    })
+    $f.Controls.Add($btnFile)
 
     # --- ok / cancel
     $btnOk = New-Object Windows.Forms.Button
@@ -1737,7 +1994,7 @@ function Show-Settings {
     # place above the bottom edge
     foreach ($c in $f.Controls) {
         if ($c -eq $grid -or $c.Top -lt $btnY) { continue }
-        $c.Anchor = if ($c -eq $txtDirs -or $c -eq $txtMenu)              { 'Bottom,Left,Right' }
+        $c.Anchor = if ($c -eq $txtSearch -or $c -eq $txtMenu)            { 'Bottom,Left,Right' }
                     elseif ($c -eq $btnOk -or $c -eq $btnCancel -or $c -eq $btnMenu) { 'Bottom,Right' }
                     else                                                 { 'Bottom,Left' }
     }
@@ -1794,6 +2051,12 @@ function Show-Settings {
         foreach ($cd in $script:colorKeys) { $cols[$cd.Key] = ConvertTo-ColorText $colorBoxes[$cd.Key].BackColor }
         $new['colors']       = $cols
         $new['dirs']         = @($txtDirs.Lines | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        $searches = [ordered]@{}
+        foreach ($line in $txtSearch.Lines) {
+            $m = [regex]::Match($line, '^\s*(?<kw>[^\s=]+)\s*=\s*(?<url>\S.*?)\s*$')
+            if ($m.Success) { $searches[$m.Groups['kw'].Value.ToLowerInvariant()] = $m.Groups['url'].Value }
+        }
+        $new['webSearches']  = $searches
 
         try { Save-Config $new }
         catch {
@@ -1943,7 +2206,9 @@ $hint.Height    = [int][math]::Max(18, $fSize * 1.8)
 $hint.ForeColor = $colDim
 $hint.Font      = New-Object Drawing.Font($fontName, ($fSize - 1.5))
 $hint.TextAlign = 'MiddleLeft'
-$script:hintDefault = '  Enter run   Shift+Enter parameters   ".." folders   "!" command   "//" web   Esc close'
+# an empty box shows what can be typed, a search shows what can be done with the entry
+$script:hintDefault = '  Type to search   ".." folders   "!" command   "//" web   "g text" web search   Esc close'
+$script:hintItems   = '  Enter run   Shift+Enter params   Ctrl+Enter folder   Ctrl+Shift+Enter admin   Ctrl+C path   Esc'
 $script:hintCalc    = '  Enter copies the result   + - * / % ^ ( ) pi e sqrt round min max log ...   Esc close'
 $script:hintWeb     = '  Enter opens it in the browser   Esc close'
 $script:dirPool  = $null
@@ -2061,12 +2326,16 @@ $list.Add_DrawItem({
 function Update-List {
     if ($script:argMode) { return }   # the box holds arguments, not a search
     $hint.Text = switch ((Split-Query $search.Text).Mode) {
-        'web'   { $script:hintWeb }
-        default { $script:hintDefault }
+        'web'    { $script:hintWeb }
+        'search' { $script:hintWeb }
+        default  { if ($search.Text.Trim()) { $script:hintItems } else { $script:hintDefault } }
     }
+    # the list for the empty box is prepared while the popup is hidden
+    $found = if (-not $search.Text.Trim() -and $null -ne $script:emptyList) { $script:emptyList }
+             else { Get-Filtered $search.Text }
     $list.BeginUpdate()
     $list.Items.Clear()
-    foreach ($i in (Get-Filtered $search.Text)) { [void]$list.Items.Add($i) }
+    foreach ($i in $found) { [void]$list.Items.Add($i) }
     $list.EndUpdate()
     if ($list.Items.Count -gt 0) {
         $list.SelectedIndex = 0
@@ -2085,7 +2354,13 @@ function Move-Selection([int] $delta) {
     $list.SelectedIndex = $i
 }
 
-function Invoke-Selected {
+function Get-SelectedEntry {
+    if ($script:argMode) { return $script:argItem }
+    if ($list.Items.Count -eq 0) { return $null }
+    $list.Items[[math]::Max($list.SelectedIndex, 0)]
+}
+
+function Invoke-Selected([switch] $Elevated) {
     # a key arriving after the popup was hidden must not start anything
     if (-not $form.Visible) { return }
     if ($script:argMode) {
@@ -2093,13 +2368,13 @@ function Invoke-Selected {
         $argText = $search.Text          # leaving arg mode restores the search text
         $query   = $script:argQuery
         Set-ArgMode $null
-        Invoke-Entry $item $query $argText
+        Invoke-Entry $item $query $argText -Elevated:$Elevated
         return
     }
-    if ($list.Items.Count -eq 0) { return }
-    $idx = [math]::Max($list.SelectedIndex, 0)
+    $item = Get-SelectedEntry
+    if (-not $item) { return }
     # learn the text without the "dir"/"cd" prefix, so it matches on the next search
-    Invoke-Entry $list.Items[$idx] (Split-Query $search.Text).Query ''
+    Invoke-Entry $item (Split-Query $search.Text).Query '' -Elevated:$Elevated
 }
 
 # Shift+Enter switches the search box into an argument box for the selected entry.
@@ -2138,12 +2413,26 @@ $search.Add_KeyDown({
         'PageUp'   { Move-Selection -5; $e.Handled = $true; $e.SuppressKeyPress = $true }
         'Enter'    {
             $e.Handled = $true; $e.SuppressKeyPress = $true
-            if ($e.Shift -and -not $script:argMode) {
-                if ($list.Items.Count -gt 0) {
-                    Set-ArgMode $list.Items[[math]::Max($list.SelectedIndex, 0)]
-                }
+            if ($e.Control -and $e.Shift) {
+                Invoke-Selected -Elevated
+            } elseif ($e.Control) {
+                $item = Get-SelectedEntry
+                if ($item) { Show-InFolder $item }
+            } elseif ($e.Shift -and -not $script:argMode) {
+                $item = Get-SelectedEntry
+                if ($item) { Set-ArgMode $item }
             } else {
                 Invoke-Selected
+            }
+        }
+        'C'        {
+            # with text selected Ctrl+C keeps copying the text
+            if ($e.Control -and -not $e.Shift -and -not $e.Alt -and $search.SelectionLength -eq 0) {
+                $item = Get-SelectedEntry
+                if ($item -and $item.Path) {
+                    $e.Handled = $true; $e.SuppressKeyPress = $true
+                    Copy-EntryPath $item
+                }
             }
         }
         'Escape'   {
@@ -2197,20 +2486,63 @@ function Get-FolderSignature {
                 @(Get-ChildItem -LiteralPath $root -Recurse -Directory -Force -EA SilentlyContinue)
         ($dirs | ForEach-Object { "$($_.FullName)|$($_.LastWriteTimeUtc.Ticks)" }) -join ';'
     }
-    ($parts -join '#')
+    # the settings that shape the list belong to it too, so the cache from a run with
+    # other sources or filters is never taken as current
+    $shape = @($script:cfg.sources, $script:cfg.includeNames, $script:cfg.excludeNames,
+               $script:cfg.dropDuplicates) | ConvertTo-Json -Depth 4 -Compress
+    $shape + '#' + ($parts -join '#')
 }
 
+# returns true when the list was rebuilt
 function Update-Items([switch] $Force) {
     $sig = Get-FolderSignature
-    if (-not $Force -and $sig -eq $script:itemsSig) { return }
-    $script:items    = Get-Items
-    $script:itemsSig = $sig
+    if (-not $Force -and $sig -eq $script:itemsSig) { return $false }
+    $script:fileItems = @(Get-FileItems)
+    $script:items     = @($script:fileItems) + @(Get-CommandItems)
+    $script:itemsSig  = $sig
+    $script:emptyList = $null
+    Save-ItemsCache
     Log "item list rebuilt: $($script:items.Count) entries"
     Start-IconWorker
+    $true
 }
 
+# While the popup is hidden the app keeps itself ready: it picks up hand edits of the
+# config, looks for new or removed entries every few seconds and prepares the list and
+# the icons the next popup opens with, so opening it does no work at all.
+$script:folderCheckSec  = 10
+$script:nextFolderCheck = [DateTime]::MinValue
+$script:configStamp     = $null
+
+function Get-ConfigStamp {
+    try { (Get-Item -LiteralPath $configPath).LastWriteTimeUtc.Ticks } catch { 0 }
+}
+
+function Invoke-IdleWork {
+    if ($form.Visible -or $script:settingsForm) { return }
+    $stamp = Get-ConfigStamp
+    if ($stamp -ne $script:configStamp) {
+        Log 'config file changed'
+        Reset-Config
+        return
+    }
+    if ([DateTime]::UtcNow -ge $script:nextFolderCheck) {
+        $script:nextFolderCheck = [DateTime]::UtcNow.AddSeconds($script:folderCheckSec)
+        [void](Update-Items)
+    }
+    if ($null -eq $script:emptyList) {
+        $script:emptyList = @(Get-Filtered '')
+        foreach ($i in ($script:emptyList | Select-Object -First ([int]$script:cfg.rows))) { [void](Get-ItemIcon $i) }
+    }
+}
+
+$idleTimer = New-Object Windows.Forms.Timer
+$idleTimer.Interval = 1000
+$idleTimer.Add_Tick({
+    try { Invoke-IdleWork } catch { Log "idle work failed: $($_.Exception.Message)" }
+})
+
 function Show-Launcher {
-    Update-Items
     $script:dirPool = $null      # folders are re-read once per popup
     $script:argMode = $false
     $script:argItem = $null
@@ -2360,7 +2692,6 @@ function Update-TrayMenu {
     [void]$menu.Items.Add('Open launcher',             $null, { Show-Launcher })
     [void]$menu.Items.Add('Open settings',             $null, { Show-Settings })
     [void]$menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
-    [void]$menu.Items.Add('Reload settings and lists', $null, { Reset-Config })
     [void]$menu.Items.Add('Exit launcher',             $null, { Stop-QuickLaunch })
 }
 
@@ -2383,12 +2714,14 @@ function Reset-Config {
     if (-not (Register-QlHotKey)) {
         $tray.ShowBalloonTip(4000, 'QuickLaunch', "Hotkey '$($script:cfg.hotkey)' could not be registered.", 'Warning')
     }
-    Update-Items -Force
+    [void](Update-Items -Force)
+    $script:configStamp = Get-ConfigStamp
     Log 'config reloaded'
 }
 
 function Stop-QuickLaunch {
     Log 'exit'
+    $idleTimer.Stop()
     $iconTimer.Stop()
     Complete-IconWorker
     $tray.Visible = $false
@@ -2399,9 +2732,18 @@ function Stop-QuickLaunch {
 
 # --- run ----------------------------------------------------------------------
 
-$script:items    = @()
-$script:itemsSig = ''
-Update-Items -Force      # also pre-warms the icon cache in the background
+$script:items     = @()
+$script:fileItems = @()
+$script:itemsSig  = ''
+$script:emptyList = $null
+# the list of the last run makes the popup usable at once; the idle work checks the
+# folders a second later and rebuilds the list only when something changed
+if (Read-ItemsCache) {
+    Log "entry cache loaded: $($script:items.Count) entries"
+    Start-IconWorker
+} else {
+    [void](Update-Items -Force)      # also pre-warms the icon cache in the background
+}
 
 if (-not (Register-QlHotKey)) {
     $tray.ShowBalloonTip(5000, 'QuickLaunch',
@@ -2421,6 +2763,8 @@ if ($script:configIsNew) {
     $firstRun.Start()
 }
 
+$script:configStamp = Get-ConfigStamp
+$idleTimer.Start()
 [Windows.Forms.Application]::Run()
 
 $mutex.ReleaseMutex()
