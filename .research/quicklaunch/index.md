@@ -5,7 +5,7 @@ Audit from 2026-10-16. Priorities, as the user set them: 1. how fast the popup o
 
 | Priority | Proposal | Effort | State |
 | --- | --- | --- | --- |
-| 1 | [Speed and stability](speed-and-stability.md) - hook on its own thread, popup shown before the work, error handler, faster start | small to medium | cached list, idle refresh, cached DLL, UAC cancel done; hook thread, error handler, row painting open |
+| 1 | [Speed and stability](speed-and-stability.md) - hook on its own thread, popup shown before the work, error handler, faster start | small to medium | done |
 | 2 | [System commands](system-commands.md) - lock, sleep, restart, shut down, Windows settings pages | small | done as a deployable set of .lnk files, not built-in entries: the user wants to rename them and give them alternative names |
 | 3 | [Entry actions](entry-actions.md) - run as administrator, open the containing folder, copy the path | small | done |
 | 4 | [Web search keywords](web-search-keywords.md) - `g text`, `yt text`, `wiki text` | small | done |

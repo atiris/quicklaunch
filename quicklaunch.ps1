@@ -243,32 +243,69 @@ public class QlNative : NativeWindow, IDisposable {
     // refuses them, and the only way to answer them first is a low-level hook. The hook
     // callback must stay quick, so it only swallows the key and posts a message - the
     // popup is opened later, from the message loop.
+    //
+    // Every key pressed anywhere in Windows waits for the hook callback, and Windows
+    // silently removes a hook that does not answer within about a second. The PowerShell
+    // UI thread is busy now and then, so the hook lives on a thread of its own that does
+    // nothing but pump its messages.
 
     public delegate IntPtr LowLevelKeyboardProc(int code, IntPtr wParam, IntPtr lParam);
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MSG { public IntPtr hwnd; public uint message; public IntPtr wParam, lParam; public uint time; public int x, y; }
+    [DllImport("user32.dll")] private static extern int GetMessage(out MSG msg, IntPtr hWnd, uint min, uint max);
+    [DllImport("user32.dll")] private static extern bool PeekMessage(out MSG msg, IntPtr hWnd, uint min, uint max, uint remove);
+    [DllImport("user32.dll")] private static extern bool PostThreadMessage(uint thread, int msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+
     private const int WH_KEYBOARD_LL = 13;
     private const int WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101, WM_SYSKEYDOWN = 0x0104, WM_SYSKEYUP = 0x0105;
+    private const int WM_QUIT = 0x0012;
     private const int WM_QLHOTKEY = 0x0402;          // WM_USER + 2
-    private const int LLKHF_INJECTED = 0x10;
     private static readonly IntPtr OwnInput = (IntPtr)0x51CF;   // marks the keys we send ourselves
 
     private LowLevelKeyboardProc hookProc;   // held so the delegate is not collected
-    private IntPtr hook = IntPtr.Zero;
+    private volatile bool hookActive;
+    private System.Threading.Thread hookThread;
+    private uint hookThreadId;
+    private IntPtr postTarget;
     private uint hookMods, hookVk;
     private bool swallowUp;
 
-    public bool HookActive { get { return hook != IntPtr.Zero; } }
+    public bool HookActive { get { return hookActive; } }
 
     public bool StartHook(uint mods, uint vk) {
         StopHook();
         hookMods = mods; hookVk = vk;
+        postTarget = this.Handle;
         hookProc = new LowLevelKeyboardProc(HookCallback);
-        hook = SetWindowsHookEx(WH_KEYBOARD_LL, hookProc, GetModuleHandle(null), 0);
-        return hook != IntPtr.Zero;
+        System.Threading.ManualResetEvent ready = new System.Threading.ManualResetEvent(false);
+        hookThread = new System.Threading.Thread(() => {
+            MSG msg;
+            hookThreadId = GetCurrentThreadId();
+            PeekMessage(out msg, IntPtr.Zero, 0, 0, 0);    // creates the queue StopHook posts to
+            IntPtr hook = SetWindowsHookEx(WH_KEYBOARD_LL, hookProc, GetModuleHandle(null), 0);
+            hookActive = hook != IntPtr.Zero;
+            ready.Set();
+            if (!hookActive) return;
+            while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0) { }
+            UnhookWindowsHookEx(hook);
+            hookActive = false;
+        });
+        hookThread.IsBackground = true;
+        hookThread.Priority = System.Threading.ThreadPriority.AboveNormal;
+        hookThread.Start();
+        ready.WaitOne();
+        ready.Dispose();
+        return hookActive;
     }
 
     public void StopHook() {
-        if (hook != IntPtr.Zero) { UnhookWindowsHookEx(hook); hook = IntPtr.Zero; }
+        if (hookThread != null) {
+            PostThreadMessage(hookThreadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
+            hookThread.Join(2000);
+            hookThread = null;
+        }
         hookProc = null;
         swallowUp = false;
     }
@@ -286,10 +323,11 @@ public class QlNative : NativeWindow, IDisposable {
     }
 
     private IntPtr HookCallback(int code, IntPtr wParam, IntPtr lParam) {
+        // an exception here would end the whole process, so nothing may escape
+        try {
         if (code >= 0) {
             int msg   = (int)wParam;
             int vk    = Marshal.ReadInt32(lParam, 0);
-            int flags = Marshal.ReadInt32(lParam, 8);
             IntPtr extra = Marshal.ReadIntPtr(lParam, 16);
             if (vk == (int)hookVk && extra != OwnInput) {
                 if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && ModifiersMatch()) {
@@ -300,7 +338,7 @@ public class QlNative : NativeWindow, IDisposable {
                         keybd_event(0x11, 0, 2, OwnInput);
                     }
                     swallowUp = true;
-                    PostMessage(this.Handle, WM_QLHOTKEY, IntPtr.Zero, IntPtr.Zero);
+                    PostMessage(postTarget, WM_QLHOTKEY, IntPtr.Zero, IntPtr.Zero);
                     return (IntPtr)1;
                 }
                 if ((msg == WM_KEYUP || msg == WM_SYSKEYUP) && swallowUp) {
@@ -310,7 +348,8 @@ public class QlNative : NativeWindow, IDisposable {
                 }
             }
         }
-        return CallNextHookEx(hook, code, wParam, lParam);
+        } catch { }
+        return CallNextHookEx(IntPtr.Zero, code, wParam, lParam);   // the hook handle is ignored
     }
 
     protected override void WndProc(ref Message m) {
@@ -420,7 +459,8 @@ public class QlProbe : NativeWindow, IDisposable {
 }
 '@
 $nativeRefs = @('System.Windows.Forms', 'System.Windows.Forms.Primitives', 'System.Drawing',
-                'System.ComponentModel.Primitives', 'System.ObjectModel', 'System.Drawing.Primitives')
+                'System.ComponentModel.Primitives', 'System.ObjectModel', 'System.Drawing.Primitives',
+                'System.Threading', 'System.Threading.Thread')
 
 # Compiling the helper costs ~300 ms on every start, loading a compiled DLL ~7 ms. The DLL
 # name carries a hash of the source and the PowerShell version, so any change compiles anew.
@@ -441,6 +481,15 @@ try {
     Remove-Item -LiteralPath $nativeDll -Force -EA SilentlyContinue
     Add-Type -TypeDefinition $nativeSource -ReferencedAssemblies $nativeRefs
 }
+
+# An error that escapes an event handler would otherwise show the WinForms "Unhandled
+# exception" dialog or end the tray app; it is logged and the app keeps running. The mode
+# can only be set before the first window exists.
+[Windows.Forms.Application]::SetUnhandledExceptionMode([Windows.Forms.UnhandledExceptionMode]::CatchException)
+[Windows.Forms.Application]::add_ThreadException({
+    param($s, $e)
+    Log "unhandled error: $($e.Exception.Message)"
+})
 
 if (-not $ShowConsole) { [QlNative]::HideConsole() }
 
@@ -2114,6 +2163,26 @@ function Update-Metrics {
 }
 Update-Metrics
 
+# Fonts and brushes for painting the list hold native GDI+ objects. Made once per layout
+# instead of once per painted row, so a popup open for weeks does not pile them up for
+# the garbage collector.
+$script:paint = $null
+function Update-PaintTools {
+    if ($script:paint) { foreach ($o in $script:paint.Values) { $o.Dispose() } }
+    $script:paint = @{
+        Name   = New-Object Drawing.Font($fontName, $script:fSize)
+        Group  = New-Object Drawing.Font($fontName, ($script:fSize - 1))
+        Back   = New-Object Drawing.SolidBrush $script:colBack
+        Sel    = New-Object Drawing.SolidBrush $script:colSel
+        Fore   = New-Object Drawing.SolidBrush $script:colFore
+        Dim    = New-Object Drawing.SolidBrush $script:colDim
+        SelDim = New-Object Drawing.SolidBrush $script:colSelDim
+        Thumb  = New-Object Drawing.SolidBrush $script:colThumb
+        Marker = New-Object Drawing.Pen $script:colDim
+    }
+}
+Update-PaintTools
+
 $form = New-Object Windows.Forms.Form
 $form.FormBorderStyle = 'None'
 $form.ShowInTaskbar   = $false
@@ -2169,8 +2238,7 @@ $scrollBar.Add_Paint({
     # nothing to scroll - the strip stays invisible instead of showing an empty track
     if (-not $t) { $e.Graphics.Clear($script:colBack); return }
     $e.Graphics.Clear($script:colScroll)
-    $e.Graphics.FillRectangle((New-Object Drawing.SolidBrush $script:colThumb),
-        2, $t.Top, ($s.Width - 4), $t.Height)
+    $e.Graphics.FillRectangle($script:paint.Thumb, 2, $t.Top, ($s.Width - 4), $t.Height)
 })
 
 $scrollBar.Add_MouseDown({
@@ -2263,6 +2331,7 @@ $listArea.BringToFront()
 function Update-Layout {
     Update-Metrics
     Update-ColorValues
+    Update-PaintTools
     $form.BackColor    = $script:colBack
     $search.BackColor  = $script:colSearch
     $search.ForeColor  = $script:colFore
@@ -2289,8 +2358,7 @@ $list.Add_DrawItem({
     try {
     $it  = $s.Items[$e.Index]
     $sel = ([int]$e.State -band [int][Windows.Forms.DrawItemState]::Selected) -ne 0
-    $bg  = if ($sel) { $colSel } else { $colBack }
-    $e.Graphics.FillRectangle((New-Object Drawing.SolidBrush $bg), $e.Bounds)
+    $e.Graphics.FillRectangle($(if ($sel) { $script:paint.Sel } else { $script:paint.Back }), $e.Bounds)
 
     $x = $e.Bounds.Left + 6
     if ($script:cfg.showIcons) {
@@ -2299,23 +2367,19 @@ $list.Add_DrawItem({
             $e.Graphics.DrawImage($img, $x, ($e.Bounds.Top + $iconTop), 16, 16)
         } elseif ($it.Path) {
             # icon not cached yet - the background worker fills it in
-            $e.Graphics.DrawRectangle((New-Object Drawing.Pen $colDim),
-                ($x + 3), ($e.Bounds.Top + $iconTop + 3), 9, 9)
+            $e.Graphics.DrawRectangle($script:paint.Marker, ($x + 3), ($e.Bounds.Top + $iconTop + 3), 9, 9)
         }
         $x += 24
     }
 
-    $fName = New-Object Drawing.Font($fontName, $fSize)
-    $brFore = New-Object Drawing.SolidBrush $colFore
+    $pt = $script:paint
     $ty = $e.Bounds.Top + $textTop
-    $e.Graphics.DrawString($it.Name, $fName, $brFore, $x, $ty)
+    $e.Graphics.DrawString($it.Name, $pt.Name, $pt.Fore, $x, $ty)
 
     if ($script:cfg.showGroup -and $it.Group) {
-        $w = $e.Graphics.MeasureString($it.Name, $fName).Width
-        $fDim     = New-Object Drawing.Font($fontName, ($fSize - 1))
-        $dimColor = if ($sel) { $script:colSelDim } else { $colDim }
-        $brDim    = New-Object Drawing.SolidBrush $dimColor
-        $e.Graphics.DrawString($it.Group, $fDim, $brDim, ($x + $w + 10), ($ty + 2))
+        $w     = $e.Graphics.MeasureString($it.Name, $pt.Name).Width
+        $brDim = if ($sel) { $pt.SelDim } else { $pt.Dim }
+        $e.Graphics.DrawString($it.Group, $pt.Group, $brDim, ($x + $w + 10), ($ty + 2))
     }
     } catch {
         # a throwing handler aborts the whole paint loop and blanks the list
