@@ -20,7 +20,7 @@ through one of the launchers below.
 | Way | What it does |
 | --- | --- |
 | `start.bat` | double-click; checks for PowerShell 7, installs it if you agree, then starts hidden |
-| `quicklaunch.vbs` | starts with no console window at all (used by the logon task) |
+| `quicklaunch.vbs` | starts with no console window at all (used by `start.bat`) |
 | `quicklaunch-run.ps1` | "Run with PowerShell" from Explorer; re-launches the real script under `pwsh` |
 | `pwsh -File quicklaunch.ps1` | direct start |
 
@@ -36,8 +36,8 @@ pwsh -File .\quicklaunch.ps1 -Install     # register the "QuickLaunch" logon tas
 pwsh -File .\quicklaunch.ps1 -Uninstall   # remove it
 ```
 
-The task runs `wscript.exe quicklaunch.vbs` 15 seconds after logon, so nothing flashes
-up. The same switch is available as a checkbox in the settings window.
+The task runs `conhost.exe --headless pwsh -File quicklaunch.ps1` 15 seconds after logon,
+so no window opens and no script host is involved. The same switch is available as a checkbox in the settings window.
 
 Other parameters: `-ShowConsole` keeps the console visible for debugging.
 

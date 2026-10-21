@@ -169,10 +169,13 @@ function Uninstall-LogonTask {
 
 function Install-LogonTask {
     [void](Uninstall-LogonTask)
-    # wscript + the .vbs shim start it without any console window flashing up
-    $vbs = Join-Path $scriptDir 'quicklaunch.vbs'
-    $action  = New-ScheduledTaskAction -Execute "$env:WINDIR\System32\wscript.exe" `
-                -Argument "`"$vbs`""
+    # conhost --headless gives pwsh a console with no window, and no script host that
+    # Defender would take for a dropper. pwsh started straight lands in a Windows
+    # Terminal window that -WindowStyle Hidden cannot hide, and closing it ends the app.
+    $pwsh = Get-Command pwsh.exe -CommandType Application -EA SilentlyContinue | Select-Object -First 1
+    $pwsh = $(if ($pwsh) { $pwsh.Source } else { Join-Path $PSHOME 'pwsh.exe' })
+    $action  = New-ScheduledTaskAction -Execute "$env:WINDIR\System32\conhost.exe" -WorkingDirectory $scriptDir `
+                -Argument ('--headless "{0}" -NoProfile -ExecutionPolicy Bypass -File "{1}"' -f $pwsh, $scriptPath)
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
     $trigger.Delay = 'PT15S'
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
