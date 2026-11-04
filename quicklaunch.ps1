@@ -1570,6 +1570,20 @@ function Get-TerminalLaunch($item, [string] $arguments, [switch] $Elevated) {
             $target   = $link.TargetPath
             $linkArgs = $link.Arguments
         } catch { return $null }
+        if (-not $target) { return $null }
+    }
+    # a Store app shortcut is explorer.exe opening shell:AppsFolder\<app id>; its command
+    # alias in WindowsApps is what takes a folder
+    $app = [regex]::Match($linkArgs, '^\s*shell:AppsFolder\\(?<id>[^_!]+)')
+    if ((Split-Path -Leaf $target) -eq 'explorer.exe' -and $app.Success) {
+        $alias = switch ($app.Groups['id'].Value) {
+            'Microsoft.WindowsTerminal'        { 'wt.exe' }
+            'Microsoft.WindowsTerminalPreview' { 'wt.exe' }
+            'Microsoft.PowerShell'             { 'pwsh.exe' }
+        }
+        if (-not $alias) { return $null }
+        $target   = $alias
+        $linkArgs = ''
     }
     $q = if ($dir.Contains(' ')) { "`"$dir`"" } else { $dir }
     $run = @{ File = $target; Args = $linkArgs; WorkDir = $dir }
