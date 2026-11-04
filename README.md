@@ -49,9 +49,21 @@ Other parameters: `-ShowConsole` keeps the console visible for debugging.
   and the Run box no longer appears. Set the hotkey to something else, or turn
   `hookReserved` off, and Run comes straight back.
 - **typing** - filters the list; several words all have to match
-- **Up / Down** - move the selection, **Enter** - run it (the first entry when nothing was moved)
-- **Shift+Enter** - run the selected entry *with parameters*: the search box turns into an
-  argument box, pre-filled with the arguments used last time for that entry
+- **Up / Down** - move the selection, **PgUp / PgDn** - a page at a time,
+  **Enter** - run it (the first entry when nothing was moved)
+- **Right** (caret at the end), **Tab** or **Shift+Enter** - give the selected entry a
+  *parameter*: the box splits, the program moves to the left half and the parameter is
+  typed in the right half, pre-filled with the one used last time for that entry
+- in the parameter half the list shows the typed text first, then folders: a typed path
+  (`D:\scr`) lists what its folder holds, anything else filters the `dir` folder list.
+  **Tab** puts the selected folder into the parameter to go a level deeper, **Enter** runs
+  the program with the selected row
+- **Shift+Tab**, **Left** at the start of the parameter, or a click on the left half -
+  back to the program: its whole name is selected, typing searches programs again, and
+  **Tab** / **Right** / **Enter** carries the new choice on with the same parameter
+- a terminal (cmd, PowerShell, Windows Terminal, WSL, Tabby) given a folder opens in that
+  folder, given a file in the folder holding it
+- **Escape** in the split goes back to the plain search
 - **Ctrl+Shift+Enter** - run the selected entry as administrator
 - **Ctrl+Enter** - open the folder holding the selected entry, with it selected; for a
   shortcut, the folder of its target

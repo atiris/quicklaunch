@@ -1175,6 +1175,56 @@ function Get-DirPool {
     $script:dirPool
 }
 
+# the first row of the parameter list: the typed text as it is
+function New-ArgItem([string] $text) {
+    [pscustomobject]@{
+        Key      = 'arg:'
+        Name     = $(if ($text) { $text } else { '(no parameter)' })
+        Group    = 'Parameter'
+        Path     = ''
+        IconFile = ''
+        Command  = $null
+        Aliases  = @()
+        Search   = ''
+        NameNorm = ''
+        Shortcut = ''
+    }
+}
+
+function New-FileItem($file) {
+    $item = New-DirItem $file.FullName
+    $item.IconFile = ''
+    $item
+}
+
+# a typed path lists what its folder holds, starting with the typed leaf
+function Get-PathItems([string] $text) {
+    $t = $text.Trim().Trim('"')
+    if ($t -notmatch '^([A-Za-z]:|\\\\[^\\]+\\[^\\]+)') { return @() }
+    if ($t -match '^[A-Za-z]:$') { $t = "$t\" }
+    if ($t.EndsWith('\')) { $dir = $t; $leaf = '' }
+    else                  { $dir = Split-Path -Parent $t; $leaf = Split-Path -Leaf $t }
+    if (-not $dir -or -not (Test-Path -LiteralPath $dir -PathType Container)) { return @() }
+    $like = [WildcardPattern]::Escape($leaf) + '*'
+    $found = @(Get-ChildItem -LiteralPath $dir -Force -EA SilentlyContinue |
+        Where-Object { $_.Name -like $like -and -not ($_.Attributes -band [IO.FileAttributes]::Hidden) } |
+        Sort-Object -Property @{ E = { -not $_.PSIsContainer } }, Name | Select-Object -First 200)
+    @($found | ForEach-Object { if ($_.PSIsContainer) { New-DirItem $_.FullName } else { New-FileItem $_ } })
+}
+
+# The parameter half: the typed text first, then the folders and files it points at -
+# a typed path lists its folder, anything else filters the "dir" folder list.
+function Get-ArgItems([string] $text) {
+    $rest = @(Get-PathItems $text)
+    if (-not $rest.Count -and -not ($text -match '^\s*"?([A-Za-z]:|\\\\)')) {
+        $q      = (Remove-Diacritics $text.Trim()).ToLowerInvariant()
+        $tokens = @($q -split '\s+' | Where-Object { $_ })
+        $rest = @(Get-DirPool | Where-Object { Test-Match $_ $tokens } |
+            Sort-Object -Property @{ E = { Get-Score $_ $q }; Descending = $true }, Name)
+    }
+    @(New-ArgItem $text) + $rest
+}
+
 function Get-FileItems {
     $sources = @(Get-EffectiveSources)
     $items   = @()
@@ -1505,6 +1555,49 @@ function Start-Shell([string] $file, [string] $arguments, [string] $workDir, [sw
     if ($p) { $p.Dispose() }
 }
 
+# A terminal given a folder or a file as its parameter opens in that folder, or in the
+# folder holding the file, instead of receiving the path as a command. Returns $null for
+# anything else, which then gets the parameter as it is.
+function Get-TerminalLaunch($item, [string] $arguments, [switch] $Elevated) {
+    $p = $arguments.Trim().Trim('"')
+    if (-not $p -or $p -notmatch '^([A-Za-z]:|\\\\)' -or -not (Test-Path -LiteralPath $p)) { return $null }
+    $dir = if (Test-Path -LiteralPath $p -PathType Container) { $p } else { Split-Path -Parent $p }
+    $target   = [string]$item.Path
+    $linkArgs = ''
+    if ($target -like '*.lnk') {
+        try {
+            $link = (New-Object -ComObject WScript.Shell).CreateShortcut($target)
+            $target   = $link.TargetPath
+            $linkArgs = $link.Arguments
+        } catch { return $null }
+    }
+    $q = if ($dir.Contains(' ')) { "`"$dir`"" } else { $dir }
+    $run = @{ File = $target; Args = $linkArgs; WorkDir = $dir }
+    switch ((Split-Path -Leaf $target).ToLowerInvariant()) {
+        'cmd.exe' {
+            # an elevated start ignores the working folder, so it is changed by a command
+            if ($Elevated -and -not $linkArgs) { $run.Args = "/k cd /d $q" }
+        }
+        { $_ -in 'powershell.exe', 'pwsh.exe' } {
+            if ($Elevated -and -not $linkArgs) {
+                $run.Args = "-NoExit -Command Set-Location -LiteralPath '$($dir.Replace("'", "''"))'"
+            }
+        }
+        { $_ -in 'wt.exe', 'windowsterminal.exe' } {
+            # Windows Terminal starts in its profile folder unless told with -d
+            $rest = [regex]::Replace($linkArgs, '(^|\s)(-d|--startingDirectory)\s+("[^"]*"|\S+)', '').Trim()
+            $run.Args = "-d $q $rest".Trim()
+        }
+        { $_ -in 'wsl.exe', 'bash.exe' } {
+            $rest = [regex]::Replace($linkArgs, '(^|\s)--cd\s+("[^"]*"|\S+)', '').Trim()
+            $run.Args = "--cd $q $rest".Trim()
+        }
+        'tabby.exe' { $run.Args = "open $q" }
+        default     { return $null }
+    }
+    $run
+}
+
 function Invoke-Entry($item, [string] $query, [string] $arguments, [switch] $Elevated) {
     Hide-Launcher
     # a calculation or a web search is never repeated, so it stays out of the usage file
@@ -1520,6 +1613,12 @@ function Invoke-Entry($item, [string] $query, [string] $arguments, [switch] $Ele
     }
     Log "launch $($item.Path)  (query '$query', args '$arguments', elevated $([bool]$Elevated))"
     try {
+        $term = if ($arguments) { Get-TerminalLaunch $item $arguments -Elevated:$Elevated }
+        if ($term) {
+            Log "terminal $($term.File) in $($term.WorkDir)  (args '$($term.Args)')"
+            Start-Shell $term.File $term.Args $term.WorkDir -Elevated:$Elevated
+            return
+        }
         # ShellExecute passes arguments through to a shortcut's target as well
         switch -Wildcard ($item.Path) {
             '*.ps1' {
@@ -2196,15 +2295,35 @@ $script:padPx         = 7        # dark frame around the whole popup
 $form.Padding         = New-Object Windows.Forms.Padding($script:padPx)
 $form.Width           = [int]$script:cfg.width
 
-$search = New-Object Windows.Forms.TextBox
-$search.BorderStyle = 'None'
-$search.BackColor   = $colSearch
-$search.ForeColor   = $colFore
-$search.Font        = New-Object Drawing.Font($fontName, ($fSize + 3))
-$search.Dock        = 'Top'
-$search.Multiline   = $true      # a single-line TextBox ignores Height
-$search.Height      = $searchH
-$form.Controls.Add($search)
+# The top strip holds the search box alone, or - split by Right / Tab / Shift+Enter - the
+# program on the left and its parameter on the right. Both halves stay editable.
+function New-InputBox {
+    $b = New-Object Windows.Forms.TextBox
+    $b.BorderStyle = 'None'
+    $b.BackColor   = $colSearch
+    $b.ForeColor   = $colFore
+    $b.Font        = New-Object Drawing.Font($fontName, ($fSize + 3))
+    $b.Multiline   = $true      # a single-line TextBox ignores Height
+    $b.AcceptsTab  = $true      # Tab and Shift+Tab move between the halves
+    $b.Height      = $searchH
+    $b.Dock        = 'Fill'
+    $b
+}
+$searchBar = New-Object Windows.Forms.Panel
+$searchBar.Dock   = 'Top'
+$searchBar.Height = $searchH
+$search = New-InputBox
+$argBox = New-InputBox
+$argBox.Visible = $false
+$argSep = New-Object Windows.Forms.Panel
+$argSep.Dock    = 'Left'
+$argSep.Width   = 6
+$argSep.Visible = $false
+# docking runs from the back of the z-order: search docks left first, the parameter fills
+$searchBar.Controls.Add($argBox)
+$searchBar.Controls.Add($argSep)
+$searchBar.Controls.Add($search)
+$form.Controls.Add($searchBar)
 
 $listArea = New-Object Windows.Forms.Panel
 $listArea.Dock = 'Fill'
@@ -2279,13 +2398,14 @@ $hint.Font      = New-Object Drawing.Font($fontName, ($fSize - 1.5))
 $hint.TextAlign = 'MiddleLeft'
 # an empty box shows what can be typed, a search shows what can be done with the entry
 $script:hintDefault = '  Type to search   ".." folders   "!" command   "//" web   "g text" web search   Esc close'
-$script:hintItems   = '  Enter run   Shift+Enter params   Ctrl+Enter folder   Ctrl+Shift+Enter admin   Ctrl+C path   Esc'
+$script:hintItems   = '  Enter run   Right params   Ctrl+Enter folder   Ctrl+Shift+Enter admin   Ctrl+C path   Esc'
 $script:hintCalc    = '  Enter copies the result   + - * / % ^ ( ) pi e sqrt round min max log ...   Esc close'
 $script:hintWeb     = '  Enter opens it in the browser   Esc close'
 $script:dirPool  = $null
 $script:argMode  = $false
 $script:argItem  = $null
 $script:argQuery = ''
+$script:argActive = $false     # the parameter half has the keyboard
 $hint.Text      = $script:hintDefault
 $hint.Dock      = 'Fill'
 
@@ -2336,8 +2456,11 @@ function Update-Layout {
     Update-ColorValues
     Update-PaintTools
     $form.BackColor    = $script:colBack
-    $search.BackColor  = $script:colSearch
+    Set-ActiveBox
     $search.ForeColor  = $script:colFore
+    $argBox.ForeColor  = $script:colFore
+    $argSep.BackColor  = $script:colBack
+    $searchBar.BackColor = $script:colBack
     $list.BackColor    = $script:colBack
     $list.ForeColor    = $script:colFore
     $listArea.BackColor = $script:colBack
@@ -2348,7 +2471,11 @@ function Update-Layout {
     $list.Invalidate()
     $form.Width     = [int]$script:cfg.width
     $search.Font    = New-Object Drawing.Font($fontName, ($script:fSize + 3))
+    $argBox.Font    = $search.Font
     $search.Height  = $script:searchH
+    $argBox.Height  = $script:searchH
+    $searchBar.Height = $script:searchH
+    if ($script:argMode) { Set-SplitWidth }
     $list.ItemHeight = $script:rowH
     $hint.Font      = New-Object Drawing.Font($fontName, ($script:fSize - 1.5))
     $hintBar.Height = [int][math]::Max(18, $script:fSize * 1.8) + $script:hintGapPx
@@ -2368,7 +2495,7 @@ $list.Add_DrawItem({
         $img = Get-ItemIcon $it
         if ($img) {
             $e.Graphics.DrawImage($img, $x, ($e.Bounds.Top + $iconTop), 16, 16)
-        } elseif ($it.Path) {
+        } elseif ($it.IconFile) {
             # icon not cached yet - the background worker fills it in
             $e.Graphics.DrawRectangle($script:paint.Marker, ($x + 3), ($e.Bounds.Top + $iconTop + 3), 9, 9)
         }
@@ -2390,52 +2517,79 @@ $list.Add_DrawItem({
     }
 })
 
-function Update-List {
-    if ($script:argMode) { return }   # the box holds arguments, not a search
-    $hint.Text = switch ((Split-Query $search.Text).Mode) {
-        'web'    { $script:hintWeb }
-        'search' { $script:hintWeb }
-        default  { if ($search.Text.Trim()) { $script:hintItems } else { $script:hintDefault } }
-    }
-    # the list for the empty box is prepared while the popup is hidden
-    $found = if (-not $search.Text.Trim() -and $null -ne $script:emptyList) { $script:emptyList }
-             else { Get-Filtered $search.Text }
+function Set-ListItems($found) {
     $list.BeginUpdate()
     $list.Items.Clear()
     foreach ($i in $found) { [void]$list.Items.Add($i) }
     $list.EndUpdate()
-    if ($list.Items.Count -gt 0) {
-        $list.SelectedIndex = 0
-        if ($list.Items[0].Key.StartsWith('calc:')) { $hint.Text = $script:hintCalc }
-    }
+    if ($list.Items.Count -gt 0) { $list.SelectedIndex = 0 }
     $rows = [math]::Max(1, [math]::Min([int]$script:cfg.rows, $list.Items.Count))
-    $form.Height = $search.Height + ($rows * $rowH) + $hintBar.Height + ($script:padPx * 2)
+    $form.Height = $searchBar.Height + ($rows * $rowH) + $hintBar.Height + ($script:padPx * 2)
     $scrollBar.Invalidate()
 }
 
-function Move-Selection([int] $delta) {
-    if ($script:argMode -or $list.Items.Count -eq 0) { return }
+function Update-List {
+    if ($script:argActive) {
+        $hint.Text = "  Parameter for $($script:argItem.Name)   Enter run   Tab complete folder   Shift+Tab program   Esc back"
+        Set-ListItems (Get-ArgItems $argBox.Text)
+        return
+    }
+    $hint.Text = switch ((Split-Query $search.Text).Mode) {
+        'web'    { $script:hintWeb }
+        'search' { $script:hintWeb }
+        default  {
+            if ($script:argMode)          { '  Enter run with the parameter   Tab / Right parameter   Esc back' }
+            elseif ($search.Text.Trim()) { $script:hintItems } else { $script:hintDefault }
+        }
+    }
+    # the list for the empty box is prepared while the popup is hidden
+    $found = if (-not $search.Text.Trim() -and $null -ne $script:emptyList) { $script:emptyList }
+             else { Get-Filtered $search.Text }
+    Set-ListItems $found
+    if ($list.Items.Count -gt 0 -and $list.Items[0].Key.StartsWith('calc:')) { $hint.Text = $script:hintCalc }
+}
+
+# the arrows wrap around, a page stops at the first or the last row
+function Move-Selection([int] $delta, [switch] $Page) {
+    if ($list.Items.Count -eq 0) { return }
+    if ($Page) { $delta *= [math]::Max(1, $list.VisibleRows - 1) }
     $i = $list.SelectedIndex + $delta
-    if ($i -lt 0) { $i = $list.Items.Count - 1 }
-    if ($i -ge $list.Items.Count) { $i = 0 }
+    $last = $list.Items.Count - 1
+    if ($Page) { $i = [math]::Max(0, [math]::Min($i, $last)) }
+    elseif ($i -lt 0) { $i = $last }
+    elseif ($i -gt $last) { $i = 0 }
     $list.SelectedIndex = $i
 }
 
 function Get-SelectedEntry {
-    if ($script:argMode) { return $script:argItem }
     if ($list.Items.Count -eq 0) { return $null }
     $list.Items[[math]::Max($list.SelectedIndex, 0)]
+}
+
+# the program a parameter can be given to: the one in the split, or the selected file entry
+function Get-ProgramEntry {
+    if ($script:argActive) { return $script:argItem }
+    $item = Get-SelectedEntry
+    if (-not $item -or $item.Command -or -not $item.Path -or $item.IconFile -eq $script:folderIconFile) { return $null }
+    $item
+}
+
+# a picked folder or file becomes the parameter, quoted only when it has to be -
+# "D:\" in quotes would reach the program as D:"
+function Get-SelectedArgument {
+    $sel = Get-SelectedEntry
+    if (-not $sel -or $sel.Key -eq 'arg:') { return $argBox.Text }
+    if ($sel.Path.Contains(' ')) { "`"$($sel.Path)`"" } else { $sel.Path }
 }
 
 function Invoke-Selected([switch] $Elevated) {
     # a key arriving after the popup was hidden must not start anything
     if (-not $form.Visible) { return }
     if ($script:argMode) {
-        $item    = $script:argItem
-        $argText = $search.Text          # leaving arg mode restores the search text
-        $query   = $script:argQuery
-        Set-ArgMode $null
-        Invoke-Entry $item $query $argText -Elevated:$Elevated
+        if ($script:argActive) { $item = $script:argItem; $argText = Get-SelectedArgument }
+        else                   { $item = Get-ProgramEntry; $argText = $argBox.Text }
+        if (-not $item) { return }
+        Invoke-Entry $item $script:argQuery $argText -Elevated:$Elevated
         return
     }
     $item = Get-SelectedEntry
@@ -2444,71 +2598,150 @@ function Invoke-Selected([switch] $Elevated) {
     Invoke-Entry $item (Split-Query $search.Text).Query '' -Elevated:$Elevated
 }
 
-# Shift+Enter switches the search box into an argument box for the selected entry.
-function Set-ArgMode($item) {
-    if ($item) {
-        $script:argMode  = $true
-        $script:argItem  = $item
-        $script:argQuery = $search.Text
-        $u = if ($script:usage.ContainsKey($item.Key)) { $script:usage[$item.Key] } else { $null }
-        $search.Text = if ($u) { [string]$u.args } else { '' }
-        $search.SelectionStart = $search.Text.Length
-        $hint.Text = "  Parameters for: $($item.Name)     Enter run   Esc back"
-        # show only the entry being parameterised
-        $list.BeginUpdate()
-        $list.Items.Clear()
-        [void]$list.Items.Add($item)
-        $list.EndUpdate()
-        $list.SelectedIndex = 0
-        $form.Height = $searchH + $rowH + $hintBar.Height + ($script:padPx * 2)
-    } else {
-        $script:argMode = $false
-        $script:argItem = $null
-        $hint.Text = $script:hintDefault
-        $search.Text = $script:argQuery
-        $search.SelectionStart = $search.Text.Length
-        Update-List
-    }
+function Set-SplitWidth {
+    $w = [Windows.Forms.TextRenderer]::MeasureText("$($search.Text)WW", $search.Font).Width
+    $search.Width = [int][math]::Max(60, [math]::Min($w, $searchBar.Width * 0.45))
 }
 
-$search.Add_KeyDown({
-    param($s, $e)
-    switch ($e.KeyCode) {
-        'Down'     { Move-Selection 1;  $e.Handled = $true; $e.SuppressKeyPress = $true }
-        'Up'       { Move-Selection -1; $e.Handled = $true; $e.SuppressKeyPress = $true }
-        'PageDown' { Move-Selection 5;  $e.Handled = $true; $e.SuppressKeyPress = $true }
-        'PageUp'   { Move-Selection -5; $e.Handled = $true; $e.SuppressKeyPress = $true }
-        'Enter'    {
-            $e.Handled = $true; $e.SuppressKeyPress = $true
-            if ($e.Control -and $e.Shift) {
-                Invoke-Selected -Elevated
-            } elseif ($e.Control) {
-                $item = Get-SelectedEntry
-                if ($item) { Show-InFolder $item }
-            } elseif ($e.Shift -and -not $script:argMode) {
-                $item = Get-SelectedEntry
-                if ($item) { Set-ArgMode $item }
-            } else {
-                Invoke-Selected
-            }
-        }
-        'C'        {
-            # with text selected Ctrl+C keeps copying the text
-            if ($e.Control -and -not $e.Shift -and -not $e.Alt -and $search.SelectionLength -eq 0) {
-                $item = Get-SelectedEntry
-                if ($item -and $item.Path) {
-                    $e.Handled = $true; $e.SuppressKeyPress = $true
-                    Copy-EntryPath $item
-                }
-            }
-        }
-        'Escape'   {
-            $e.Handled = $true; $e.SuppressKeyPress = $true
-            if ($script:argMode) { Set-ArgMode $null } else { Hide-Launcher }
-        }
+function Set-ActiveBox {
+    $search.BackColor = if ($script:argActive) { $script:colBack } else { $script:colSearch }
+    $argBox.BackColor = if ($script:argActive) { $script:colSearch } else { $script:colBack }
+}
+
+# Right / Tab / Shift+Enter: the program moves to the left half, the parameter is typed
+# on the right, pre-filled with the one used last time for that program
+function Enter-ArgMode($item) {
+    if (-not $script:argMode) {
+        $script:argQuery = $search.Text
+        $u = if ($script:usage.ContainsKey($item.Key)) { $script:usage[$item.Key] } else { $null }
+        $argBox.Text = if ($u) { [string]$u.args } else { '' }
+        $argBox.SelectAll()
+        $script:argMode   = $true
+        $search.Dock      = 'Left'
+        $argSep.Visible   = $true
+        $argBox.Visible   = $true
+    } else {
+        $argBox.SelectionStart = $argBox.Text.Length
     }
+    $script:argItem   = $item
+    $script:argActive = $true
+    $search.Text      = $item.Name
+    Set-SplitWidth
+    Set-ActiveBox
+    [void]$argBox.Focus()
+    Update-List
+}
+
+function Exit-ArgMode {
+    $script:argMode   = $false
+    $script:argActive = $false
+    $script:argItem   = $null
+    $argBox.Visible   = $false
+    $argSep.Visible   = $false
+    $search.Dock      = 'Fill'
+    Set-ActiveBox
+    $search.Text = $script:argQuery
+    $search.SelectionStart = $search.Text.Length
+    [void]$search.Focus()
+    Update-List
+}
+
+# Tab on a picked folder puts it into the parameter, ready to go one level deeper
+function Complete-ArgPath {
+    $sel = Get-SelectedEntry
+    if (-not $sel -or $sel.Key -eq 'arg:') { return }
+    $argBox.Text = if ($sel.IconFile -eq $script:folderIconFile) { $sel.Path.TrimEnd('\') + '\' } else { $sel.Path }
+    $argBox.SelectionStart = $argBox.Text.Length
+}
+
+$onInputKey = {
+    param($s, $e)
+    $inArg = $s -eq $argBox
+    $k = $e.KeyCode
+    # Keys.PageDown and Keys.Next share one value and it prints as "Next", so keys are
+    # compared as enum values, never as names
+    if ($k -eq [Windows.Forms.Keys]::Down)     { Move-Selection 1;  $e.Handled = $true; $e.SuppressKeyPress = $true; return }
+    if ($k -eq [Windows.Forms.Keys]::Up)       { Move-Selection -1; $e.Handled = $true; $e.SuppressKeyPress = $true; return }
+    if ($k -eq [Windows.Forms.Keys]::PageDown) { Move-Selection 1 -Page;  $e.Handled = $true; $e.SuppressKeyPress = $true; return }
+    if ($k -eq [Windows.Forms.Keys]::PageUp)   { Move-Selection -1 -Page; $e.Handled = $true; $e.SuppressKeyPress = $true; return }
+    if ($k -eq [Windows.Forms.Keys]::Enter) {
+        $e.Handled = $true; $e.SuppressKeyPress = $true
+        if ($e.Control -and $e.Shift) {
+            Invoke-Selected -Elevated
+        } elseif ($e.Control) {
+            $item = if ($inArg) { $script:argItem } else { Get-SelectedEntry }
+            if ($item) { Show-InFolder $item }
+        } elseif ($e.Shift -and -not $script:argMode) {
+            $item = Get-ProgramEntry
+            if ($item) { Enter-ArgMode $item }
+        } else {
+            Invoke-Selected
+        }
+        return
+    }
+    if ($k -eq [Windows.Forms.Keys]::Right) {
+        if (-not $inArg -and $s.SelectionLength -eq 0 -and $s.SelectionStart -eq $s.Text.Length) {
+            $item = Get-ProgramEntry
+            if ($item) { $e.Handled = $true; $e.SuppressKeyPress = $true; Enter-ArgMode $item }
+        }
+        return
+    }
+    if ($k -eq [Windows.Forms.Keys]::Left) {
+        if ($inArg -and $s.SelectionLength -eq 0 -and $s.SelectionStart -eq 0) {
+            $e.Handled = $true; $e.SuppressKeyPress = $true
+            [void]$search.Focus()
+        }
+        return
+    }
+    if ($k -eq [Windows.Forms.Keys]::Tab) {
+        $e.Handled = $true; $e.SuppressKeyPress = $true
+        if ($e.Shift)  { if ($inArg) { [void]$search.Focus() } }
+        elseif ($inArg) { Complete-ArgPath }
+        else {
+            $item = Get-ProgramEntry
+            if ($item) { Enter-ArgMode $item }
+        }
+        return
+    }
+    if ($k -eq [Windows.Forms.Keys]::C) {
+        # with text selected Ctrl+C keeps copying the text
+        if ($e.Control -and -not $e.Shift -and -not $e.Alt -and $s.SelectionLength -eq 0) {
+            $item = Get-SelectedEntry
+            if ($item -and $item.Path) {
+                $e.Handled = $true; $e.SuppressKeyPress = $true
+                Copy-EntryPath $item
+            }
+        }
+        return
+    }
+    if ($k -eq [Windows.Forms.Keys]::Escape) {
+        $e.Handled = $true; $e.SuppressKeyPress = $true
+        if ($script:argMode) { Exit-ArgMode } else { Hide-Launcher }
+    }
+}
+$search.Add_KeyDown($onInputKey)
+$argBox.Add_KeyDown($onInputKey)
+$search.Add_TextChanged({
+    if ($script:argMode) { Set-SplitWidth }
+    if (-not $script:argActive) { Update-List }
 })
-$search.Add_TextChanged({ Update-List })
+$argBox.Add_TextChanged({ if ($script:argActive) { Update-List } })
+# back in the program half - by Shift+Tab, Left or a click - programs are searched again,
+# with the whole name selected so typing replaces it
+$search.Add_Enter({
+    if (-not $script:argMode -or -not $script:argActive) { return }
+    $script:argActive = $false
+    Set-ActiveBox
+    Update-List
+    # a click places the caret after this handler, so the selection is made afterwards
+    [void]$form.BeginInvoke([Action] { $search.SelectAll() })
+})
+$argBox.Add_Enter({
+    if ($script:argActive) { return }
+    $item = Get-ProgramEntry
+    if (-not $item) { [void]$search.Focus(); return }
+    Enter-ArgMode $item
+})
 $list.Add_MouseDoubleClick({ Invoke-Selected })
 $list.Add_MouseClick({
     param($s, $e)
@@ -2611,8 +2844,7 @@ $idleTimer.Add_Tick({
 
 function Show-Launcher {
     $script:dirPool = $null      # folders are re-read once per popup
-    $script:argMode = $false
-    $script:argItem = $null
+    if ($script:argMode) { Exit-ArgMode }
     $hint.Text      = $script:hintDefault
     $search.Text    = ''
     Update-List
